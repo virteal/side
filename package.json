@@ -1,0 +1,25 @@
+{
+  "name": "side",
+  "version": "0.1.0",
+  "description": "Synchronous javascript thanks to caching & pure functions",
+  "main": "index.js",
+  "scripts": {
+    "test": "node index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/virteal/side.git"
+  },
+  "keywords": [
+    "async",
+    "callback",
+    "promise",
+    "lambda"
+  ],
+  "author": "Jean Hugues Robert",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/virteal/side/issues"
+  },
+  "homepage": "https://github.com/virteal/side#readme"
+}
