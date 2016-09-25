@@ -144,7 +144,7 @@ function do( it, context, param ){
 
     return "some_result: " + param + a + b;
 
-    // ... handle exceptions ...
+  // ... handle exceptions ...
   }catch( error ){
     it.catch( error );
     console.error( "an error occurred", error );
@@ -152,5 +152,133 @@ function do( it, context, param ){
   }
 }
 
-Side( do, config, "x" ).then( ( r ) => console.log( r ) );
+Side( do, config, "x" ).then( r => console.log( r ) );
 ```
+
+## API
+
+```javascript
+var Side = require( "side" );
+var new_side_action = Side( function(){ return "ok"; } );
+```
+
+The Side module exports a function that creates new side actions like
+`side.start()` does.
+
+
+### side.start( f, ctx, p1, p2, ... )
+
+This is similar to `Side( ... )`, it starts a new side action. The new side
+action is a child action of the parent side action.
+
+`f` is the only mandatory parameter, it is expected to be a function object. 
+If it is a thenable promise instead, the outcome of the new side action depends
+on the outcome of that promise.
+
+Function `f` is called immediately. It either returns a result, raise an
+exception or "blocks". If it blocks (a special exception) then function `f`
+will typically run again later when the reason for the block is removed.
+
+The signature of `f` is `f( side_action, ctx, p1, p2, ... )`. `side_action` is the
+newly created side action. ctx is the value provided when the side action was
+started or an empty `{}` object. The other parameters are the one provide to
+`side.start()`.
+
+`side.start()` returns a new Side action object. With the exception of the
+`Side()` function itself, all other API methods are member functions of such
+Side action objects.
+
+Unless the new side action is created by the special root action (using
+`side.root.start()` or the `Side()` factory), it is a sub side action of its
+parent action. The parent action won't terminate until all its child side
+actions are done.
+
+
+### side.get()
+
+When the outcome of a side action is available, `side.get()` will provide it,
+either as a normal value or by raising an exception. If the outcome is not
+available then `side.get()` "blocks" by raising a special exception.
+
+
+### side.then( ok, ko )
+
+Side actions are thenable promises. The outcome of the side action is delivered
+to either the `ok` or `ko` callback depending on success/failure. Failure is
+detected when some unhandled exception is raised by the side action. In that
+case, the error is delivered to the `ko` callback.
+
+
+### side.run()
+
+This is a shorthand for `side.start( ... ).get()`.
+
+
+### side.retry() & side.wait()
+
+When a function needs to block it simply raises a special exception using 
+`side.wait()`. When the blocked function can be deblocked, it calls the 
+function previously acquired using `side.retry()`.
+
+Usage:
+```javascript
+if( data_is_available() ){
+  return data_value();
+}else{
+  var retry = side.retry();
+  async_get_data( function( err, value ){
+    data_fill( err, value );
+    retry();
+  } );
+  side.wait();
+}
+```
+
+If `side.wait()` is called without `side.retry()` beeing called first, then it
+does nothing, assuming no retry is needed.
+
+As a convenience `side.wait( a_promise )` will automatically call `side.retry()`
+and will use its result when the promise is delivered. It blocks the action.
+
+
+### side.catch( err )
+
+When an exception is raised it can be either a regular exception or the
+special exception used to signal that the current side action needs to block.
+
+Using `side.catch( err )`, such special exceptions signaling blocks will be
+rethrown. See also `side.is_block()`.
+
+Usage:
+
+```javascript
+try{
+  ...
+}catch( error ){
+  side.catch( error );
+  // ... process 'normal' exceptions
+}
+```
+
+### side.is_block( err )
+
+Like `side.catch()` but returning `true` if the parameter is the special
+exception signaling blocks.
+
+
+### side.detach()
+
+When a side action is created, it is initially a child side action of another
+action. That parent action cannot success until all such child side actions are
+done. `side.detach()` remove a side action from the list of sub actions of its
+parent action ; a parent action that therefore does not need anymore to wait
+for the sub action to success.
+
+Usage:
+```javascript
+ side.start( f ).detach();
+```
+
+Please note that `side.root.start( f )` will produce a similar effect because the
+new side action is directly attached to the special root side action instead of
+beeing attached to the action that started it.

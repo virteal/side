@@ -183,6 +183,9 @@ Side._init = function( new_action, ctx ){
 
 Side._reset = function( action ){
   
+  // How many time the action was attempted
+  action.attemps = 0;
+  
   // Actions that have reversible side effects own the global mutex lock
   action.mutex = null;
   
@@ -264,7 +267,14 @@ Side.prototype._process = function( error ){
     }
   }
   
-  if( action.deblocker )debugger;
+  // If sub actions are runnning, they must succeed first
+  if( action.subactions )return;
+  
+  // Don't run if some deblocker function needs to be called first
+  if( action.deblocker ){
+    debugger;
+    return;
+  }
   
   // Remember new current action
   CurrentAction = action;
@@ -276,6 +286,7 @@ Side.prototype._process = function( error ){
   if( action.state === 0 ){
     action.state = 1;
     if( is_promise ){
+      action.attemps = 1;
       var queue = Writing ? WriteQueue : Queue;
       action.code.then(
         function( value ){
@@ -304,7 +315,13 @@ Side.prototype._process = function( error ){
     this.last_key      = this.init_last_key;
     this.next_slot_id  = 0;
     
+    this.attemps++;
+    
     try{
+      
+      // Detect excessive attempts
+      if( this.max_attempts && this.attemps > this.max_attempts 
+      )throw new Error( "Side attempts" );
       
       var value = action.code.apply( action.context, action.arguments );
       
@@ -361,7 +378,7 @@ Side.prototype._process = function( error ){
   var actions;
   
   // If action is terminating after a success
-  if( action.state === 2 ){
+  if( action.state === 2 && !action.subactions ){
     
     // Are there "write" operations to process?
     while( ( actions = action.write_queue ).length ){
@@ -502,12 +519,12 @@ Side.prototype.catch = function( err ){
 };
 
 
-Side.prototype.create = Side;
+Side.prototype.start = Side;
 
 
-Side.prototype.run = function( code ){
-// Sugar for Side( code ).get(). It blocks if the underlying code blocks.
-  var action = new Side( code );
+Side.prototype.run = function(){
+// Sugar for side.start( code ).get(). It blocks if the underlying code blocks.
+  var action = this.start.apply( this, arguments );
   return action.get();
 };
 
@@ -719,7 +736,7 @@ Side.prototype.restore = function( code, code2, no_mutex ){
       Mutex = action;
       action.mutex = action;
     }else{
-      if( action.mutex !== Mutex )throw new Error( "mutex" );
+      if( action.mutex !== Mutex )throw new Error( "Side mutex" );
     }
     if( code2 ){
       var safe = code();
@@ -775,8 +792,7 @@ Side.prototype.ize = function( fn ){
   var f = function(){
     var args = arguments;
     var that = this;
-    var action = Side( ()=> fn.apply( that, args ) );
-    return action.get();
+    return Side.it.run( function(){ return fn.apply( that, args ); } );
   };
   return f;
 };
@@ -975,12 +991,12 @@ Side.prototype.key = function( key /* , ... */ ){
 
 Side.prototype.async_call = function( key, fun ){
   var action = this;
-  var key = action.key( key );
+  key = action.key( key );
   var cb = action.fill( key );
   if( cb ){
     var args = Array.prototype.slice.call( arguments, 2 );
     args.push( cb );
-    fun.apply( this, args );
+    fun.apply( null, args );
     action.wait();
   }
   return action.cache( key );
@@ -1112,38 +1128,81 @@ SideSlot.prototype.get = function(){
 
 Side.prototype.slot = function( code ){
 // Allocate a new slot or return the cached slot value.
-// Throw an exception if slots desynchronisation is detected.
+// Throw an exception if slot desynchronisation is detected.
 // See Side.needs() to check if a slot is new and needs to be filled.
   
   var action = this;
   
   var id = action.next_slot_id++;
   
+  // If the slot already exists, provide the memorized outcome
   if( id < action.slots.length ){
     var slot = action.slots[ id ];
     // If not a new slot, check that it is not out of sync
     if( slot.last_key !== action.last_key
     )throw new Error( 
-      "slot " + action.last_key + " vs " + slot.last_key
+      "Side slot " + action.last_key + " vs " + slot.last_key
     );
+    // Raise an exception if outcome was an error
     if( slot.error )throw slot.error;
+    // Block if outcome is still pending
+    if( slot.value === Side )throw Side;
+    // Return the outcome value
     return slot.value;
   }
   
+  // A new slot is needed, create it
   var new_slot = new SideSlot( action, id );
   
   if( code ){
-    new_slot.value = Side;
+    
+    var filler;
+    
+    // A thenable promise
     if( code.then ){
-      var filler = new_slot.filler();
-      code.then( ok => filler( ok ), ko => filler( null, ko ) );
+      // Set sentinel value to flag pending outcome
+      new_slot.value = Side;
+      // Create a filler function to inject value (or error) in new slot
+      filler = new_slot.filler();
+      code.then( 
+        function( ok ){ filler( ok ); },
+        function( ko ){ filler( null, ko ); }
+      );
+      // Block
       Side.wait();
-    }else{
-      code( new_slot.filler() );
-      if( new_slot.value === Side ){
-        Side.wait();
+      
+    // A callable function
+    }else if( code.call ){
+      new_slot.value = Side;
+      filler = new_slot.filler();
+      var result = code.call( null, filler );
+      // Result may be a thenable promise
+      if( result && result.then ){
+        result.then( 
+          function( ok ){ filler( null, ok ); },
+          function( ko ){ filler( ko ); }
+        );
+        action.wait();
+      // If not a promise, then the filler callback needs to be called
+      }else{
+        // Block unless filler was called
+        if( new_slot.value === Side ){
+          action.wait();
+        }
       }
+      
+    // An immediate true value
+    }else{
+      new_slot.value = code;
     }
+  
+  // Some false value
+  }else if( arguments.length ){
+    new_slot.value = code;
+  
+  // Undefined slot, that needs to be filled later
+  }else{
+    new_slot.value = Side;
   }
   
   return new_slot;
@@ -1198,7 +1257,8 @@ Side.prototype.restart = function( ctx ){
   var action = this;
   
   var state = action.state;
-  if( state !== 0 && state !== 4 && state !== 5 )throw new Error( "restart" );
+  if( state !== 0 && state !== 4 && state !== 5 
+  )throw new Error( "Side restart" );
   action.state = 0;
   
   if( arguments.length ){
@@ -1487,6 +1547,9 @@ Side.prototype.smoke_tests = function( with_trace ){
 RootAction = new Side( function(){ return "root"; } );
 CurrentAction = RootAction;
 Side.it = RootAction;
+
+// Provide access to the root action
+Side.prototype.root = RootAction;
 
 // Alias, universal access to the action factory
 Side.prototype.Side = Side;
