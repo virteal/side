@@ -475,7 +475,7 @@ Side.prototype._process = function( error ){
       Writing++;
       
       // Wait until all done or error
-      Side( elem ).then(
+      action.start( elem ).then(
         
         // If success, exit writing mode when all done
         function(){
