@@ -155,6 +155,104 @@ function do( it, context, param ){
 Side( do, config, "x" ).then( r => console.log( r ) );
 ```
 
+### Concepts
+
+#### blocking functions
+
+In most computer languages a "blocking" function is a function that
+can be interrupted and later restarted at that point of interruption.
+
+In javascript only special "generator" functions behave this way.
+Normal functions never block. As a result, javascript is mostly a
+single threaded synchronous language, without concurrency.
+
+Instead, javascript is "event based". When a function needs to wait
+for something, it needs to describe what will happen next when that
+something happens. This is typically done using "callbacks".
+
+Interrupting a function is easy, one just needs to throw an exception.
+If that exception is not handled by the current function then it is
+propagated to the caller function, up to the top of the call chain if
+no functions at all handle the exception.
+
+What is impossible is to restart the interrupted function. However, any
+function in the call chain can handle the exception and can therefore
+decide to retry the interrupted function, by restarting it, typically after
+some event occured that the interrupted function was expecting.
+
+
+#### pure functions
+
+Restarting a function from its beginning is very different from restarting
+it from some well known point of interruption. However, in some cases, the
+effects are the same. Specially with "pure" functions.
+
+Such special functions are called "pure" because they have no "side effects",
+they just produce a result depending on their parameters, without modifying
+anything around. The same pure function called a million times with the same
+parameter will always produce the same result.
+
+Using lots of pure functions is typical of a style of programming known as
+"functional programming". The absence of side effects has many benefits,
+makes it much easier to test and debug functions. It has a major drawback:
+nothing changes, much as if the pure function had never been called.
+
+Consequentely, pure functions need to be called by some much less pure
+ones, in order to produce some observable change.
+
+The Side module uses pure functions to simulate blocking functions.
+From the point of vue of the function code, it's like if the function
+could be interrupted and restarted, much like blocking functions.
+
+
+#### cache
+
+Obviously, something need to change to successfully restart an interrupted
+function. Maybe it is the result of some IO operation that became available.
+Maybe it is some promise that is fulfilled. Something. A something that
+the interrupted function had to take care of, had to make happen. By
+initiating some action.
+
+Such functions are not pure anymore. If ran twice, they will initiate two
+actions. That's problematic. Unless, somehow, a mechanism prevent the
+duplicate actions. A "cache" is such a mechanism.
+
+A typical scenario is a function that needs to access some data. But that
+data is not available immediately, it needs to be provided by some
+external resource that must be queried. The javascript function cannot
+block until the data is provided, it cannot wait, it must return.
+
+However, once the data becomes available, it can be stored locally. As a result,
+if the same data is needed again, this time it can be provided immediately,
+with no block, with no interruption. If the same function is run again, this
+time it won't need to be blocked or interrupted, it will access the data
+in a synchronous way.
+
+This is how Side works. Using pure functions and caches. And the magic
+occur: javascript functions can be written as if they could block.
+
+This works only with "read" type of functions. "write" type of functions,
+functions that need to change things, that need to produce side effects, are
+a different story.
+
+Fortunately, "read" functions are usually much more frequent than "write"
+functions, making Side useful often.
+
+
+#### side effects
+
+To help with "write" type function, Side provides tools to encapsulate side
+effects in order to produce them in a well controlled manner. Manners actually.
+Three of them.
+
+
+#### transactions
+
+#### cache entries
+
+#### slots
+
+
 ## API
 
 ```javascript
@@ -181,7 +279,7 @@ will typically run again later when the reason for the block is removed.
 
 The signature of `f` is `f( side_action, ctx, p1, p2, ... )`. `side_action` is the
 newly created side action. ctx is the value provided when the side action was
-started or an empty `{}` object. The other parameters are the one provide to
+started or an empty `{}` object. The other parameters are the ones provided to
 `side.start()`.
 
 `side.start()` returns a new Side action object. With the exception of the
@@ -209,7 +307,7 @@ detected when some unhandled exception is raised by the side action. In that
 case, the error is delivered to the `ko` callback.
 
 
-### side.run()
+### side.run( f, ctx, p1, p2, ... )
 
 This is a shorthand for `side.start( ... ).get()`.
 
@@ -238,7 +336,8 @@ If `side.wait()` is called without `side.retry()` beeing called first, then it
 does nothing, assuming no retry is needed.
 
 As a convenience `side.wait( a_promise )` will automatically call `side.retry()`
-and will use its result when the promise is delivered. It blocks the action.
+and will use its result when the promise is delivered. Until that, it blocks
+the action.
 
 
 ### side.catch( err )
@@ -272,7 +371,7 @@ When a side action is created, it is initially a child side action of another
 action. That parent action cannot success until all such child side actions are
 done. `side.detach()` remove a side action from the list of sub actions of its
 parent action ; a parent action that therefore does not need anymore to wait
-for the sub action to success.
+for the sub action to succeed.
 
 Usage:
 ```javascript
