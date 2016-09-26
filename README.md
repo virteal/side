@@ -190,11 +190,11 @@ effects are the same. Specially with "pure" functions.
 Such special functions are called "pure" because they have no "side effects",
 they just produce a result depending on their parameters, without modifying
 anything around. The same pure function called a million times with the same
-parameter will always produce the same result.
+parameters will always return the same result.
 
 Using lots of pure functions is typical of a style of programming known as
 "functional programming". The absence of side effects has many benefits,
-makes it much easier to test and debug functions. It has a major drawback:
+it makes it much easier to test and debug functions. It has a major drawback:
 nothing changes, much as if the pure function had never been called.
 
 Consequentely, pure functions need to be called by some much less pure
@@ -229,9 +229,9 @@ time it won't need to be blocked or interrupted, it will access the data
 in a synchronous way.
 
 This is how Side works. Using pure functions and caches. And the magic
-occur: javascript functions can be written as if they could block.
+begins: javascript functions can be written as if they could block.
 
-This works only with "read" type of functions. "write" type of functions,
+But this works only with "read" type of functions. "write" type of functions,
 functions that need to change things, that need to produce side effects, are
 a different story.
 
@@ -245,12 +245,11 @@ To help with "write" type function, Side provides tools to encapsulate side
 effects in order to produce them in a well controlled manner. Manners actually.
 Three of them.
 
+#### delayed writes
 
 #### transactions
 
-#### cache entries
-
-#### slots
+#### cache entries & slots
 
 
 ## API
@@ -264,7 +263,7 @@ The Side module exports a function that creates new side actions like
 `side.start()` does.
 
 
-### side.start( f, ctx, p1, p2, ... )
+### side.start( f, ctx, p1, p2, ... ) - starts a new side action
 
 This is similar to `Side( ... )`, it starts a new side action. The new side
 action is a child action of the parent side action.
@@ -284,7 +283,8 @@ started or an empty `{}` object. The other parameters are the ones provided to
 
 `side.start()` returns a new Side action object. With the exception of the
 `Side()` function itself, all other API methods are member functions of such
-Side action objects.
+Side action objects. When not otherwise specified, methods are chainable and
+return the side object they were invoked upon.
 
 Unless the new side action is created by the special root action (using
 `side.root.start()` or the `Side()` factory), it is a sub side action of its
@@ -292,14 +292,19 @@ parent action. The parent action won't terminate until all its child side
 actions are done.
 
 
-### side.get()
+### side.get() - gets side action outcome, or blocks
 
 When the outcome of a side action is available, `side.get()` will provide it,
 either as a normal value or by raising an exception. If the outcome is not
 available then `side.get()` "blocks" by raising a special exception.
 
 
-### side.then( ok, ko )
+### side.run( f, ctx, p1, p2, ... ) - runs a new side action
+
+This is a shorthand for `side.start( ... ).get()`.
+
+
+### side.then( ok, ko ) - registers callbacks to process side action outcome
 
 Side actions are thenable promises. The outcome of the side action is delivered
 to either the `ok` or `ko` callback depending on success/failure. Failure is
@@ -307,12 +312,7 @@ detected when some unhandled exception is raised by the side action. In that
 case, the error is delivered to the `ko` callback.
 
 
-### side.run( f, ctx, p1, p2, ... )
-
-This is a shorthand for `side.start( ... ).get()`.
-
-
-### side.retry() & side.wait()
+### side.retry() & side.wait() - blocks and later retries a side action
 
 When a function needs to block it simply raises a special exception using 
 `side.wait()`. When the blocked function can be deblocked, it calls the 
@@ -340,7 +340,14 @@ and will use its result when the promise is delivered. Until that, it blocks
 the action.
 
 
-### side.catch( err )
+### side.end( result ) - set result of side action
+
+After a call to `side.end()`, the next retry will actually terminate the
+side action. This is useful to avoid extra attempts when the last step of
+a side action blocks, specially when that last step performs a side effect.
+
+
+### side.catch( err ) - propagates blocks
 
 When an exception is raised it can be either a regular exception or the
 special exception used to signal that the current side action needs to block.
@@ -359,16 +366,16 @@ try{
 }
 ```
 
-### side.is_block( err )
+### side.is_block( err ) - detects blocks
 
 Like `side.catch()` but returning `true` if the parameter is the special
 exception signaling blocks.
 
 
-### side.detach()
+### side.detach() - detach sub side action from parent side action
 
 When a side action is created, it is initially a child side action of another
-action. That parent action cannot success until all such child side actions are
+action. That parent action cannot succeed until all such child side actions are
 done. `side.detach()` remove a side action from the list of sub actions of its
 parent action ; a parent action that therefore does not need anymore to wait
 for the sub action to succeed.
@@ -381,3 +388,75 @@ Usage:
 Please note that `side.root.start( f )` will produce a similar effect because the
 new side action is directly attached to the special root side action instead of
 beeing attached to the action that started it.
+
+
+### side.abort( error ) - premature termination of a pending side action
+
+If a side action is blocked waiting for something then it can be aborted. The
+option `error` will set the outcome, it defaults to a "Side abort" Error object.
+
+When applied to the currently running action, that action is immediately blocked,
+an exception about that is immediately raised.
+
+
+### side.blocked(), side.pending(), side.done(), side.success(), side.failure()
+
+The state of a side action evolves when its code runs. As long as attempts are
+required to make it succeed, `side.pending()` will return true.
+
+When the side action is fully terminated, `side.done()` will return true. 
+`side.success()` and `side.failure()` then tell weither the outcome is a success or an error.
+See `side.get()` to access the outcome.
+
+When a side action is neither pending nor done, it is terminating. This is a special
+phase when delayed sub actions are run to process side effects, see `side.write()`, 
+`side.restore()` and `side.finally()`.
+
+
+### side.write( fn ) - registers code to run when side action succeeds
+
+One safe way to handle side effects is to postpone them until the end of a
+side action. That way, when a side action is run multiple times because of
+blocks, side effects are still done once only.
+
+The provided `fn` function is run in a side sub action. It will run once only
+because it is expected to block at most once and a call to `side.end()` is
+for that purpose done before the side sub action starts. Functions are run in
+sequence, in the registration order, fifo style.
+
+
+### side.finally( fn ) - registers code to run when side action terminates
+
+Like `side.write()` but after. For traces typically, `side.log()` uses it.
+
+
+### side.log(), side.warn(), etc - like console.log() but without duplicates
+
+When `console.log()` is called by a side action, the same message will be
+issued multiple times when the side action blocks. Using `side.log()` such
+duplicates are avoided. Messages are issued once only, when the side action is
+done.
+
+
+### side.restore( fn ) - manage reversible side effects
+
+Because a side action runs multiple times when blocks occur, side effects, if
+any, often need to be reversible. As a result, either all side effects are done,
+when the side action succeeds, or all side effect are erased, when the side action
+fails.
+
+Additionnaly, after `side.restore()` is called, no other side action can run
+until the side action is done. The side action hence become a "transaction" that
+either commits or rollsback. Beware that no other side action will run even if
+the side action blocks. Much as if the side action had acquired a mutex on the
+global state.
+
+When called with two parameters, the first function is called immediately and
+its result is provided to the second function when/if it is called after a
+block or a failure.
+
+By using `side.restore()` a function can behave as a pure function until the
+last minute, it therefore can run multiple times safely, with side effects
+left in place only when the side action succeeds, not when it blocks or fails.
+
+
