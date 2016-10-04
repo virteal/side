@@ -57,13 +57,14 @@ performance wise when the associated cost is low compared to a cache
 miss, a miss that typically involves an IO operation.
 
 To use async functions, sync functions must cache async results. `Side.slot()`
-and `Side.cache()` help about that. They work with promises too.
+helps about that. They work with promises too.
+
 Please note that each side action has its own new cache. To manage caches
 with longer lived results, "memoize" type of solutions may help; there are
 multiple npm packages that implement it and other caching schemes.
 
-The implementation uses promises. Side action objects created using `Side()` are
-thenables. As a result, `Promise.all()` and `Promise.race()` work on them.
+Side action objects created using `Side()` are thenables, `Promise.all()`
+and `Promise.race()` work on them.
 
 Unfortunately this does not work for "write" type of code. Such code cannot
 run multiple times or else multiple writes accumulate and this is not
@@ -94,19 +95,16 @@ function do( it, context, param ){
   try{
   
     // ... cache for async functions ...
-    it.cache( "a", ()=> async_read( "some key", it.fill() ) );
+    var a = it.slot( cb => async_read( "some key", cb ) );
 
     // ... delayed write actions, ran once, on success
-    it.write( ()=> console.log( "Success, 'a' was", it.cached.a ) );
+    it.write( () => console.log( "Success, 'a' was", a ) );
 
     // ... cache for promises ...
-    var b = it.cache( "b", promise_read( it.cached.a ) );
+    var b = it.slot( () => promise_read( a ) );
 
     // ... logging, with filtering over multiple retries ...
     it.log( "'b' was", b );
-
-    // ... cache for costly procedures or to avoid double writes ...
-    var r = it.has( "r" ) ? it.get() : it.set( "r", compute_r() );
 
     // ... reversible side effects ...
     it.restore( ( r )=> some_global.value = r, some_global.value );
@@ -114,14 +112,8 @@ function do( it, context, param ){
 
     // ... sub side actions ...
     var sub = it.side( some_code ).get();
-    var sub2 = it.run( some_code );
+    var sub2 = it.run( some_code, context );
  
-    // ... shared cache entries and context ...
-    it.share( "a" );
-    it.side( function( side2 ){
-      return use_it( side2.context, side2.cache( "a" ) );
-    }, it.context );
-
     return "some_result: " + param + a + b;
 
   // ... handle exceptions ...
@@ -208,31 +200,27 @@ with no block, with no interruption. If the same function is run again, this
 time it won't need to be blocked or interrupted, it will access the data
 in a synchronous way.
 
-This is how Side works. Using pure functions and caches. And the magic
-begins: javascript functions can be written as if they could block.
+This is how Side works. Using pure functions and caches javascript functions
+can be written as if they could block.
 
 But this works only with "read" type of functions. "write" type of functions,
 functions that need to change things, that need to produce side effects, are
-a different story.
-
-Fortunately, "read" functions are usually much more frequent than "write"
-functions, making Side useful often.
+a different story. Fortunately, "read" functions are usually much more frequent
+than "write" functions.
 
 
 #### side effects
 
 To help with "write" type functions, Side provides tools to encapsulate side
-effects in order to produce them in a well controlled manner. Manners actually.
-Three of them.
+effects in order to produce them in a well controlled manner. Two manners
+actually, delayed writes and transactions.
 
-#### delayed writes
-
-#### transactions
-
-#### cache entries & slots
+Delayed writes is about postponing write operations until all blocking read
+operations are done. Transactions are about reversing side effect unless all
+blocking operations succeed and locking the global state while doing so.
 
 
-## API - side actions management
+## API
 
 ```javascript
 var Side = require( "side" );
@@ -242,6 +230,12 @@ var new_side_action = Side( function(){ return "ok"; } );
 The Side module exports a function that creates new side actions like
 `side.start()` does. That function is also accessible via any side action
 object using either `side.Side` or `side.Side`.
+
+Additionaly, for convenience, `Side()` (without parameters), creates a new
+"slot" like `side.slot()` does.
+
+Special properties `Side.it` and `Side.root` respectly reference the current
+and root side actions.
 
 
 ### Side.it, Side.root - access to current and root side actions
@@ -254,7 +248,7 @@ As a convenience, `.it` and `.root` are also available on side action objects
 in addition to their availability on the global `Side()` factory.
 
 
-### side.start( f, ctx, p1, p2, ... ) - starts a new side action
+### side.start( f, ctx, p1, p2, ... ) - start a new side action
 
 This is similar to `Side( ... )`, it starts a new side action. The new side
 action is a child action of the parent side action. That parent needs to be
@@ -285,19 +279,19 @@ parent action. The parent action won't terminate until all its child side
 actions are done.
 
 
-### side.get() - gets side action outcome, or blocks
+### side.get() - get side action outcome or block
 
 When the outcome of a side action is available, `side.get()` will provide it,
 either as a normal value or by raising an exception. If the outcome is not
 available then `side.get()` "blocks" by raising a special exception.
 
 
-### side.run( f, ctx, p1, p2, ... ) - runs a new side action
+### side.run( f, ctx, p1, p2, ... ) - run a new side action
 
 This is a shorthand for `side.start( ... ).get()`.
 
 
-### side.then( ok, ko ) - registers callbacks to process side action outcome
+### side.then( ok, ko ) - register callbacks to process side action outcome
 
 Side actions are thenable promises. The outcome of the side action is delivered
 to either the `ok` or `ko` callback depending on success/failure. Failure is
@@ -305,11 +299,11 @@ detected when some unhandled exception is raised by the side action. In that
 case, the error is delivered to the `ko` callback.
 
 
-### side.retry() & side.wait() - blocks and later retries a side action
+### side.retry() & side.wait() - block and later retry a side action
 
 When a function needs to block, it simply raises a special exception using 
 `side.wait()`. When the blocked function can be deblocked, something need to
-call the function previously acquired using `side.retry()`.
+call a function previously acquired using `side.retry()`.
 
 Usage:
 ```javascript
@@ -330,26 +324,43 @@ does nothing, assuming no retry is needed.
 
 As a convenience `side.wait( a_promise )` will automatically call `side.retry()`
 and will use its result when the promise is delivered. Until that, it blocks
-the action.
+the action by raising the special exception for that purpose.
+
+
+### side.once( key ) - run code once only
+
+Because the same code will run multiple time when blocks occur, in some cases
+it may be necessary to run some parts once only, typically when such parts
+have side effects. 
+
+`side.once( key )` returns true once only per key. After that `side.context[ key ]`
+is set to true and `side.once( key )` returns false.
+
+Usage:
+```javascript
+if( side.once( "log it" ) ){
+  console.log( "Reached" );
+}
+```
 
 
 ### side.end( result ) - set result of side action with no retries
 
 After a call to `side.end()`, the next retry will actually terminate the
 side action. This is useful to avoid an extra attempt when the last step of
-a side action blocks, specially when that last step performs a side effect.
+a side action blocks, specially when that last step performs a side effect
+and needs not to be done twice. See also `side.write()`.
 
 
 ### side.catch( err ) - propagates blocks
 
-When an exception is raised it can be either a regular exception or the
+When an exception is raised it can either be a regular exception or the
 special exception used to signal that the current side action needs to block.
 
 Using `side.catch( err )`, such special exceptions will be detected and 
 rethrown.
 
 Usage:
-
 ```javascript
 try{
   ...
@@ -363,7 +374,7 @@ try{
 ### side.detach() - detach sub side action from parent side action
 
 When a side action is created, it is initially a child side action of another
-action. That parent action cannot succeed until all such child side actions are
+action. That parent action cannot succeed until all child side actions are
 done. `side.detach()` remove a side action from the list of sub actions of its
 parent action ; a parent action that therefore does not need anymore to wait
 for the sub action to succeed.
@@ -390,16 +401,14 @@ required to make it succeed, `side.pending()` will return true.
 
 When the side action is fully terminated, `side.done()` will return true. 
 `side.success()` and `side.failure()` then tell weither the outcome is a success
-or an error. See `side.get()` also to access the outcome.
+or an error. See also `side.get()` to access the outcome.
 
 When a side action is neither pending nor done, it is terminating. This is a
 special phase when delayed sub actions are run to process side effects
 typically, see `side.write()` and `side.restore()`.
 
 
-## API - side effects and action states
-
-### side.write( fn ) - registers code to run when side action succeeds
+### side.write( fn ) - register code to run when side action succeeds
 
 One safe way to handle side effects is to postpone them until the end of a
 side action. That way, when a side action is run multiple times because of
@@ -407,8 +416,9 @@ blocks, side effects are still done once only.
 
 The provided `fn` function is run in a side sub action. It will run once only
 because it is expected to block at most once and a call to `side.end()` is
-for that purpose done before the side sub action starts. Functions are run in
-sequence, in the registration order, fifo style.
+for that purpose done before the side sub action starts. 
+
+Functions are run in sequence, in the registration order, fifo style.
 
 When a side action fails or blocks, the registered functions are not run at all.
 
@@ -435,9 +445,11 @@ fails or blocks.
 
 Additionnaly, after `side.restore()` is called, no other side action can run
 until the side action is done. The side action hence become a "transaction" that
-either commits or rollsback. Beware that no other side action will run even if
-the side action blocks. Much as if the side action had acquired a mutex on the
-global state. This behavior can be avoided by using the optional third parameter.
+either commits or rolls back.
+
+Beware that no other side action will run even if the side action blocks, much
+as if the side action had acquired a mutex on the global state. This behavior
+can be avoided by using the optional third parameter.
 
 The second parameter when present is provided to the `fn` function when/if it is
 called after a block or a failure.
@@ -447,20 +459,15 @@ last minute, it therefore can run multiple times safely, with side effects
 left in place only when the side action succeeds, not when it blocks or fails.
 
 
-## API - caching
+### side.slot( fn ) - allocate and fill a slot
 
 The trick to make side actions look like synchronous functions is to restart
-them when they need to block. The next time the function runs, something must
-have changed or else the action would get restarted forever.
+them when they need to block. However, the next time the function runs,
+something must have changed or else the action would get restarted forever.
 
 One way to manage such changes is to initiate them and collect their results
-in some cache where they will be available in a synchronous manner. Side
-provides two types of such caches: named cache entries and slots.
-
-Named cache entries are identified by a key. Slots are identified by the order
-they are allocated.
-
-### side.slot( fn ) - allocate and fill a slot
+into some cache where they will be available in a synchronous manner. With Side
+such caches are called "slots" and are used like local variables.
 
 If `fn` is a function then its signature is expected to be `f( cb )` where
 `cb` is a nodejs style callback, `cb( error, result)`. The function is expected
@@ -481,89 +488,14 @@ callback is automatically attached using `then( ok, ko )`.
 As a convenience, `Side()` is equivalent to `Side.it.slot()`, it allocates
 a new empty slot in the current side action.
 
+If neither a function nor a thenable promise is provided then whatever value
+is available is immediately returned.
+
 Usage:
 ```javascript
+var a = side.slot( cb => async_read( "something", cb ) );
 var b = side.slot( () => promise_read( "something" ) );
 ```
-
-### side.fill() - manual slot handling
-
-For more complex cases, one can manage the slot in a more manual style using
-`side.fill()`. It returns a nodejs callback that will fill the last allocated
-slot and will restart the side action.
-
-Usage:
-
-```javascript
-var c = side.slot();
-if( side.needs( c ){ 
-  async_read( "something", side.fill() );
-  side.wait();
-}
-```
-
-### side.needs( thing ) - detect empty slots
-
-When a slot is allocated using `var x = side.slot()` it is initially empty and
-needs to be filled. See `side.fill()`
-
-
-### side.key( a, b, c, ... )
-
-To name cache entries, one needs a key. It is a string. In some cases, when
-lots of cache entries are required, that string needs to be built from multiple
-parts. This is done by concatenating the JSON represention of these parts.
-
-Once a key was built, the next call to `side.key()` (without parameters) will
-return it.
-
-Usage:
-
-```javascript
-var my_key = side.key( "mem", x, y, z );
-if( !side.has( my_key ){
-  var retry = side.retry();
-  async_read( x, y, z, function( error, result ){
-    side.set( my_key, result, error );
-    retry();
-  } );
-  side.wait();
-}
-var result = side.get();
-```
-
-### side.has( key ) - detect empty cache entries
-
-If the content of a named cache entry has not been set yet then `side.has( name )`
-returns false.
-
-Usage:
-
-```javascript
-var result = side.has( "r" ) ? side.get() : side.set( "r", compute_r() );
-```
-
-### side.get( key ) - get content of cache entry
-
-This will return the content of a named cache entry. If that entry has not been
-filled yet, it will block the side action by raising a special exception.
-
-If `key` is not provided, it is the last seen key that is used instead.
-
-If the cache entry was filled with an error, using `side.set( "x", null, error )`,
-then the error is rethrown.
-
-As a convenience, `Side( key )` is equivalent to `side.it.get( key )`, it accesses
-the designated cache entry of the current side action.
-
-
-### side.set( key, value, error ) - set cached value
-
-If `error` is provided, access to the cache entry will raise it as an exception, the
-`value` is ignored.
-
-If `value` is not provided, `side.set( n )` will set entry `n` to boolean true.
-
 
 ## Side.ize( fn ) - efficiency
 
@@ -580,7 +512,6 @@ restarted 10 times instead of 30.
 
 Usage:
 ```javascript
-
 function concat_labels( items ){
   var fast_get_label = Side.ize( get_label );
   var msg = "";
@@ -590,13 +521,11 @@ function concat_labels( items ){
 }
 ```
 
-If a blockin function is always called in the context of a running side action,
+If a blocking function is always called in the context of a running side action,
 it can as well be defined as a sideized function straigth away.
 
 Usage:
-
 ```javascript
-
 User.prototype.get_profile = Side.ize( function(){
   var result = {
     name: this.name,
