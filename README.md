@@ -362,10 +362,11 @@ a side action blocks, specially when that last step performs a side effect
 and needs not to be done twice. See also `side.write()`.
 
 
-### side.catch( err ) - propagates blocks
+### side.catch( err ) - propagate blocks
 
 When an exception is raised it can either be a regular exception or the
-special exception used to signal that the current side action needs to block.
+special exception used to signal that the current side action needs to block
+before a retry.
 
 Using `side.catch( err )`, such special exceptions will be detected and 
 rethrown.
@@ -385,7 +386,9 @@ try{
 
 When a side action is created, it is initially a child side action of another
 action. That parent action cannot succeed until all child side actions are
-done. `side.detach()` remove a side action from the list of sub actions of its
+done. 
+
+`side.detach()` remove a side action from the list of sub actions of its
 parent action ; a parent action that therefore does not need anymore to wait
 for the sub action to succeed.
 
@@ -398,7 +401,7 @@ Usage:
 ### side.abort( error ) - premature termination of a pending side action
 
 If a side action is blocked waiting for something then it can be aborted. The
-option `error` will set the outcome, it defaults to a "Side abort" Error object.
+optional `error` will set the outcome, it defaults to a "Side abort" Error object.
 
 When applied to the currently running action, that action is immediately blocked,
 an exception about that is immediately raised.
@@ -416,6 +419,8 @@ or an error. See also `side.outcome()` to access the outcome.
 When a side action is neither pending nor done, it is terminating. This is a
 special phase when delayed sub actions are run to process side effects
 typically, see `side.write()` and `side.restore()`.
+
+Only pending side actions can be aborted.
 
 
 ### side.write( fn ) - register code to run when side action succeeds
