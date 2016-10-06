@@ -57,7 +57,7 @@ performance wise when the associated cost is low compared to a cache
 miss, a miss that typically involves an IO operation.
 
 To use async functions, sync functions must cache async results. `Side.slot()`
-helps about that. They work with promises too.
+helps about that. It works with promises too.
 
 Please note that each side action has its own new cache. To manage caches
 with longer lived results, "memoize" type of solutions may help; there are
@@ -110,11 +110,18 @@ function do( it, context, param ){
     it.restore( ( r )=> some_global.value = r, some_global.value );
     some_global.value = "changed";
 
-    // ... sub side actions ...
-    var sub = it.side( some_code ).get();
-    var sub2 = it.run( some_code, context );
+    var result = "some_result: " + param + a + b;
+    
+    // Code ran once only
+    if( side.once( "Done" ) ){
+      write_result( result )
+    }
  
-    return "some_result: " + param + a + b;
+    // ... sub side actions ...
+    var sub = it.side( some_code ).outcome();
+    var sub2 = it.run( some_code, context );
+    
+    return result;
 
   // ... handle exceptions ...
   }catch( error ){
@@ -131,12 +138,12 @@ Side( do, config, "x" ).then( r => console.log( r ) );
 
 #### blocking functions
 
-In most computer languages a "blocking" function is a function that
+In most computer languages, a "blocking" function is a function that
 can be interrupted and later restarted at that point of interruption.
 
 In javascript only special "generator" functions behave this way.
 Normal functions never block. As a result, javascript is mostly a
-single threaded synchronous language, without concurrency.
+single threaded synchronous language.
 
 Instead, javascript is "event based". When a function needs to wait
 for something, it has to describe what will happen next when that
@@ -149,14 +156,14 @@ no functions at all handle the exception.
 
 What is impossible is to restart the interrupted function. However, any
 function in the call chain can handle the exception and can therefore
-decide to retry the interrupted function, by restarting it, typically after
-some event occured that the interrupted function was expecting.
+decide to retry the interrupted function later, by restarting it, typically
+after some event occured that the interrupted function was expecting.
 
 
 #### pure functions
 
 Restarting a function from its beginning is very different from restarting
-it from some well known point of interruption. However, in some cases, the
+it from some well known point of interruption. However, in some cases the
 effects are the same. Specially with "pure" functions.
 
 Such special functions are called "pure" because they have no "side effects",
@@ -200,7 +207,7 @@ with no block, with no interruption. If the same function is run again, this
 time it won't need to be blocked or interrupted, it will access the data
 in a synchronous way.
 
-This is how Side works. Using pure functions and caches javascript functions
+This is how Side works. Using pure functions and caches, javascript functions
 can be written as if they could block.
 
 But this works only with "read" type of functions. "write" type of functions,
@@ -212,12 +219,16 @@ than "write" functions.
 #### side effects
 
 To help with "write" type functions, Side provides tools to encapsulate side
-effects in order to produce them in a well controlled manner. Two manners
-actually, delayed writes and transactions.
+effects in order to produce them in a well controlled manner. Three manners
+actually, delayed writes, transactions and "once only" code.
 
 Delayed writes is about postponing write operations until all blocking read
 operations are done. Transactions are about reversing side effect unless all
-blocking operations succeed and locking the global state while doing so.
+blocking operations succeed and locking the global state while doing so. Once
+only code is code that is run only the first time a retry reaches it.
+
+See `side.write()` about postponed write operations, `side.restore()` about
+transactions and `side.once()` about once only code.
 
 
 ## API
@@ -225,24 +236,23 @@ blocking operations succeed and locking the global state while doing so.
 ```javascript
 var Side = require( "side" );
 var new_side_action = Side( function(){ return "ok"; } );
+...
+new_side_action.then( r => console.log( r ) );
 ```
 
 The Side module exports a function that creates new side actions like
 `side.start()` does. That function is also accessible via any side action
-object using either `side.Side` or `side.Side`.
+object using either `side.Side` or `side.side`.
 
 Additionaly, for convenience, `Side()` (without parameters), creates a new
 "slot" like `side.slot()` does.
 
-Special properties `Side.it` and `Side.root` respectly reference the current
-and root side actions.
 
-
-### Side.it, Side.root - access to current and root side actions
+### Side.it - access to current side action
 
 When a side action runs, global `Side.it` references it. When a new side
 action is created while no side action is running, its parent is the
-special root side action.
+special root side action (`Side.root`).
 
 As a convenience, `.it` and `.root` are also available on side action objects
 in addition to their availability on the global `Side()` factory.
@@ -273,22 +283,22 @@ started or an empty `{}` object. The other parameters are the ones provided to
 Side action objects. When not otherwise specified, member functions are chainable
 and return the side object they were invoked upon.
 
-Unless the new side action is created by the special root action (using
-`side.root.start()` or the `Side()` factory), it is a sub side action of its
-parent action. The parent action won't terminate until all its child side
-actions are done.
+Unless the new side action is created while no side action is running, it is
+a sub side action of the current side action. The parent action won't terminate
+until all its child side actions are done. It can also wait for the outcome of
+the newly created side action by calling `new_action.outcome()`.
 
 
-### side.get() - get side action outcome or block
+### side.outcome() - get side action outcome or block
 
 When the outcome of a side action is available, `side.get()` will provide it,
 either as a normal value or by raising an exception. If the outcome is not
-available then `side.get()` "blocks" by raising a special exception.
+available then `side.outcome()` "blocks" by raising a special exception.
 
 
 ### side.run( f, ctx, p1, p2, ... ) - run a new side action
 
-This is a shorthand for `side.start( ... ).get()`.
+This is a shorthand for `side.start( ... ).outcome()`.
 
 
 ### side.then( ok, ko ) - register callbacks to process side action outcome
@@ -401,7 +411,7 @@ required to make it succeed, `side.pending()` will return true.
 
 When the side action is fully terminated, `side.done()` will return true. 
 `side.success()` and `side.failure()` then tell weither the outcome is a success
-or an error. See also `side.get()` to access the outcome.
+or an error. See also `side.outcome()` to access the outcome.
 
 When a side action is neither pending nor done, it is terminating. This is a
 special phase when delayed sub actions are run to process side effects

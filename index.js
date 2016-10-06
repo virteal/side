@@ -25,23 +25,35 @@
  */
 
 
-// To help debug
-var Debug = false;
+// To help debug, De&&bug() and De&&mand()
+var De = false;
+
+function bug(){
+  console.log.apply( console.log, arguments );
+}
+
+function mand( ok, msg ){
+  if( ok )return;
+  console.warn( "Failed assert:", msg );
+}
  
-// All side actions are child actions of the root action
+// Side actions are child actions of some parent, the root action when none
 var RootAction;
 
 // When running, an action becomes the "current" action
 var CurrentAction;
 
-// Unique id for actions, useful to debug
+// Unique id for actions, useful to debug, available thru side_action.id
 var NextId = 0;
  
-// Pending write actions will block normal ones
+// Pending write actions will block normal ones, non write actions are delayed
 var Writing = false;
 
 // When using .restore(), a Side action (and subactions) own a global mutex
 var Mutex = null;
+
+// When mutex is owned, other actions are queued, they run when mutex is free
+var MutexQueue = [];
 
 // Queue of actions to process
 var Queue = [];
@@ -52,11 +64,8 @@ var WriteQueue = [];
 // Queue of functions to call next time other queues are empty
 var IdleQueue = [];
 
-// Easy access to last action that blocked, ie via some kind of "throw Side;"
+// Easy access to last action that blocked via some kind of "throw Side;"
 var Block = null;
-
-// Easy access to last .fill()'s unconsummed result
-var Filler = null;
 
 
 /*
@@ -71,12 +80,9 @@ function Side( code, ctx, p1, p2, p3, p4, p5 ){
 // When the optional context was provided, it is also made available in the
 // global Side.context variable.
 
-  // Syntax sugar, Side(), with no parameters, is Side.slot();
-  if( !arguments.length )return Side.slot();
+  // Syntax sugar, Side(), with no parameters, is Side.it.slot();
+  if( !arguments.length )return Side.it.slot();
 
-  // Syntax sugar, Side( key, ... ) is Side.cache( key, ... );
-  if( typeof code === "string" )return Side.cache.apply( null, arguments );
-  
   // Enable both a = Side( ... ) and a = new Side( ... )
   if( !this )return (
   arguments.length === 2 ? new Side( code, ctx ) :
@@ -91,8 +97,81 @@ function Side( code, ctx, p1, p2, p3, p4, p5 ){
   new_action.code = code;
   new_action.arguments = arguments;
   new_action.arguments[ 0 ] = new_action;
-  Side._init(  new_action, ctx );
-  Side._reset( new_action );
+  
+  // 1-trying, 2-writing, 3-erasing, 4-success, 5-failure
+  new_action.state = 0;
+  
+  // Assign unique id to action, useful to debug
+  new_action.id = NextId++;
+  
+  // Make both Side.it and instance.it work
+  new_action.it = new_action;
+  
+  // When action is blocked, some deblocker function will unblock it
+  new_action.deblocker = null;
+  
+  // Each action can have a different context or inherit the parent action one
+  new_action.context = ctx || Side.context || {};
+  
+  // Initially, the outcome is "pending". Sentinel Side flags this situation
+  new_action._outcome = { error: 0, value: Side };
+  
+  // All actions are thenables
+  new_action.promise = null;
+  
+  // If side action is defined by a function, a promise resolver is needed
+  new_action.resolve = null;
+  new_action.reject  = null;
+  
+  // When a side action create an action, that subaction blocks the parent
+  new_action.subactions = 0;
+  
+  // Actions that have reversible side effects own the global mutex lock
+  new_action.mutex = null;
+    
+  // The current action, if any, is the parent of the new action
+  new_action.parent = CurrentAction;
+  
+  // Unless this is the first "root" action...
+  if( CurrentAction ){
+    
+    // Immediately abort new action if parent action is already done
+    if( CurrentAction.state === 4 
+    ||  CurrentAction.state === 5 
+    ){
+      // Unless current action the root action
+      if( CurrentAction !== RootAction ){
+        // ToDo: actual abort
+      }
+    }
+  
+  }else{
+    new_action.init_last_key = "root";
+  }
+  
+  // How many time the action was attempted
+  new_action.attemps = 0;
+  
+  // Queue for delayed writes
+  new_action.write_queue = null;
+  
+  // Queue to erase side effects
+  new_action.restore_queue = null;
+  
+  // Queue for code to run once, after success or failure
+  new_action.finally_queue = null;
+  
+  // Slot table
+  new_action.slots = [];
+  
+  // Action have "slots" that are equivalent to local variables
+  new_action.next_slot_id = 0;
+  
+  // Usefull to check that slot allocation order is constant
+  new_action.max_slot_id = 0;
+  
+  // The default key will be the one set at action's creation
+  new_action.last_key = null;  
   
   // When provided a thenable, it provides the outcome.
   if( code.then ){
@@ -115,103 +194,11 @@ function Side( code, ctx, p1, p2, p3, p4, p5 ){
     }
   }
   
-  Side._enqueue( new_action );
+  new_action._enqueue();
 
   return new_action;
   
 }
-
-
-Side._init = function( new_action, ctx ){
-  
-  // Assign unique id to action, useful to debug
-  new_action.id = NextId++;
-  
-  // Make both Side.it and instance.it work
-  new_action.it = new_action;
-  
-  // 1-trying, 2-writing, 3-erasing, 4-success, 5-failure
-  new_action.state = 0;
-  
-  // When action is blocked, some deblocker function will unblock it
-  new_action.deblocker = null;
-  
-  // Each action can have a different context or inherit the parent action one
-  new_action.context = ctx || Side.context || {};
-  
-  // Initially, the outcome is "pending". Sentinel Side flags this situation
-  new_action.outcome = { error: 0, value: Side };
-  
-  // All actions are thenables
-  new_action.promise = null;
-  
-  // If side action is defined by a function, a promise resolver is needed
-  new_action.resolve = null;
-  new_action.reject  = null;
-  
-  // When a side action create an action, that subaction blocks the parent
-  new_action.subactions = 0;
-  
-  // The current action, if any, is the parent of the new action
-  new_action.parent = CurrentAction;
-  
-  // Unless this is the first "root" action...
-  if( CurrentAction ){
-    
-    // Child action inherits the last cache key, as a snapshot
-    new_action.init_last_key = CurrentAction.last_key;
-  
-    // Immediately abort new action if parent action is already done
-    if( CurrentAction.state === 4 
-    ||  CurrentAction.state === 5 
-    ){
-      // Unless current action the root action
-      if( CurrentAction !== RootAction ){
-        // ToDo: actual abort
-      }
-    }
-  
-  }else{
-    new_action.init_last_key = "root";
-  }
-  
-  // Action have "slots" that are equivalent to local variables
-  new_action.next_slot_id = 0;
-  
-};
-
-
-Side._reset = function( action ){
-  
-  // How many time the action was attempted
-  action.attemps = 0;
-  
-  // Actions that have reversible side effects own the global mutex lock
-  action.mutex = null;
-  
-  // Queue for delayed writes
-  action.write_queue = [];
-  
-  // Queue to erase side effects
-  action.restore_queue = [];
-  
-  // Queue for code to run once, after success or failure
-  action.finally_queue = [];
-  
-  // Map to cache results made available for efficient retries
-  action.local_cache = {};
-  action.cached = {};
-  
-  // Slot table
-  action.slots = [];
-  
-  // Usefull to check that slot allocation order is constant
-  action.max_slot_id = 0;
-  
-  // The default key is the one set at action's creation
-  action.last_key = action.init_last_key;
-
-};
 
 
 Side._process = function(){
@@ -227,7 +214,16 @@ Side._process = function(){
   while( true ){
     
     // "write" actions must run before normal actions
-    var queue = Writing ? WriteQueue : Queue;
+    var queue;
+    if( !Mutex && MutexQueue.length ){
+      queue = MutexQueue;
+    }else{
+      if( Writing ){
+        queue = WriteQueue;
+      }else{
+        queue = Queue;
+      }
+    }
     
     // Get next action
     var action = queue.shift();
@@ -259,10 +255,11 @@ Side.prototype._process = function( error ){
 
   var action = this;
 
-  // If there is a global mutex, make sure action can run now
+  // If there is a global mutex, make sure candidate action can run now
   if( Mutex ){
+    // Or else, remember to run it when mutex is free
     if( action.mutex !== Mutex ){
-      console.log( "not mutex owner: " + action );
+      MutexQueue.push( this );
       return;
     }
   }
@@ -286,18 +283,17 @@ Side.prototype._process = function( error ){
   if( action.state === 0 ){
     action.state = 1;
     if( is_promise ){
-      action.attemps = 1;
       var queue = Writing ? WriteQueue : Queue;
       action.code.then(
         function( value ){
-          action.outcome.value = value;
+          action._outcome.value = value;
           action.state = 2;
           queue.push( action );
           Side._process();      
         },
         function( error ){
-          action.outcome.error = error || true;
-          action.outcome.value = error;
+          action._outcome.error = error || true;
+          action._outcome.value = error;
           action.state = 3;
           queue.push( action );
           Side._process();      
@@ -306,17 +302,18 @@ Side.prototype._process = function( error ){
     }
   }
   
-  // Until all blocks are cleared or error
-  if( action.state === 1 && !is_promise ){
-    
+  if( action.state === 1 ){
+    this.attemps++;
     this.write_queue   = [];
     this.restore_queue = [];
     this.finally_queue = [];
     this.last_key      = this.init_last_key;
     this.next_slot_id  = 0;
-    
-    this.attemps++;
-    
+  }
+  
+  // Until all blocks are cleared or error
+  if( action.state === 1 && !is_promise ){
+  
     try{
       
       // Detect excessive attempts
@@ -332,7 +329,7 @@ Side.prototype._process = function( error ){
         if( action.next_slot_id > action.max_slot_id ){
           action.max_slot_id = action.next_slot_id;
         }else if( action.next_slot_id < action.max_slot_id ){
-          throw new Error( "slot" );  
+          throw new Error( "Side slot" );  
         }
 
         // Avoid self reference, may loop, ie don't promise itself
@@ -343,7 +340,7 @@ Side.prototype._process = function( error ){
         action.state = 2;
         
         // Remember future result of action
-        action.outcome.value = value;
+        action._outcome.value = value;
         
       }
       
@@ -356,10 +353,7 @@ Side.prototype._process = function( error ){
         Block = action;
         
         // Reverse side effects before waiting
-        while( ( actions = action.restore_queue ).length ){
-          action.restore_queue = [];
-          process_writes( action, actions );
-        }
+        process_writes( action.restore_queue );
         
       }else{
         
@@ -367,7 +361,7 @@ Side.prototype._process = function( error ){
         action.state = 3;
         
         // Remember future result of action
-        action.outcome.error = error || true;
+        action._outcome.error = error || true;
         
       }
       
@@ -381,19 +375,19 @@ Side.prototype._process = function( error ){
   if( action.state === 2 && !action.subactions ){
     
     // Are there "write" operations to process?
-    while( ( actions = action.write_queue ).length ){
-      action.write_queue = [];
+    if( ( actions = action.write_queue ).length ){
       if( action.parent !== RootAction ){
         // Postpone until parent action success
         var parent_write_queue = action.parent.write_queue;
         parent_write_queue.push.apply( parent_write_queue, actions );
+        action.write_queue = [];
       }else{
         process_writes( action, actions );
       }
     }
     
     // Are there restore actions to remember in case of parent action failure?
-    if( action.parent !== RootAction ){
+    if( action.parent !== RootAction && action.restore_queue.length ){
       actions = action.restore_queue;
       action.restore_queue = [];
       var parent_restore_queue = action.parent.restore_queue;
@@ -404,7 +398,7 @@ Side.prototype._process = function( error ){
     if( !action.subactions ){
       action.state = 4;
       if( !is_promise ){
-        action.resolve( action.outcome.value );
+        action.resolve( action._outcome.value );
       }
     }
     
@@ -414,16 +408,13 @@ Side.prototype._process = function( error ){
   if( action.state === 3 ){
     
     // Are there actions to run to reverse side effects
-    while( ( actions = action.restore_queue ).length ){
-      action.restore_queue = [];
-      process_writes( action, actions );
-    }
+    process_writes( action, action.restore_queue );
     
     // If all done, deliver the failure outcome
     if( !action.subactions ){
       action.state = 5;
       if( !is_promise ){
-        action.reject( action.outcome.error );
+        action.reject( action._outcome.error );
       }
     }
     
@@ -432,11 +423,8 @@ Side.prototype._process = function( error ){
   // Finally
   if( action.state === 4 || action.state === 5 ){
     
-    // Are there actions to run finally
-    while( ( actions = action.finally_queue ).length ){
-      action.finally_queue = [];
-      process_writes( action, actions );
-    }
+    // Are there actions to run finally?
+    process_writes( action, action.finally_queue );
     
     // Unblock parent if last subaction
     if( !action.subactions ){
@@ -448,18 +436,19 @@ Side.prototype._process = function( error ){
   function signal_done( action ){
     // ToDo: +2 to state?
     // Free mutex lock
-    if( Mutex === action ){
-      Mutex = null;
-    }
     if( action.mutex ){
       action.mutex = null;
+      if( Mutex === action ){
+        Mutex = null;
+      }
     }
     // Unblock parent if last subaction
-    if( action.parent !== RootAction ){
-      action.parent.subactions--;
-      // Retry parent action unless it is blocked
-      if( !action.parent.subactions && !action.parent.deblocker ){
-        Side._enqueue( action.parent );
+    var parent = action.parent;
+    if( parent !== RootAction ){
+      parent.subactions--;
+      // Retry parent action unless it is otherwise blocked
+      if( !parent.subactions && !parent.deblocker ){
+        action.parent._enqueue();
       }
     }
   }
@@ -467,37 +456,39 @@ Side.prototype._process = function( error ){
   function process_writes( action, actions ){
   // Run code when action was run successfully or failed
   
-    if( !( actions && actions.length ) )return;
+    if( !( actions && actions.length ) ){
+      if( Writing ){
+        Writing = false;
+      }
+      return false;
+    }
     
-    actions.forEach( function( elem ){
-      
-      // Stay in exclusive "writing" mode until all is done
-      Writing++;
-      
-      // Wait until all done or error
-      action.start( elem ).then(
-        
-        // If success, exit writing mode when all done
-        function(){
-          Writing--;
-          Side._process();
-        },
-        
-        // If failure, abort remaining actions and signal parent
-        function( error ){
-          Writing--;
-          if( !action.parent.outcome.error ){
-            action.parent.outcome.error = error || true;
-            action.parent.state = 3;
-          }
-          Side._process();
+    var next = actions.shift();
+    
+    Writing = true;
+    
+    action.start( next ).end().then(
+      function(){ process_writes( action, actions ); },
+      function( error ){
+        if( !action.parent.outcome.error ){
+          action.parent._outcome.error = error || true;
+          action.parent.state = 3;
         }
-      );  
-    } );
+        if( Writing ){
+          Writing = false;
+        }
+        Side._process();
+      }
+    );
+    
+    return true;
+    
   }
   
   CurrentAction = RootAction;
-  Side.it       = RootAction;
+  Side.it = RootAction;
+  
+  return this;
 
 };
 
@@ -505,7 +496,7 @@ Side.prototype._process = function( error ){
 Side.prototype.is_block = function( err ){
 // Checks whether an exception is actually a block that requires a retry.
 // See side.wait() to raise such an exception, typically after a call to
-// some kind of side.retry() or side.fill().
+// some kind of side.retry().
   return err === Side;
 };
 
@@ -519,43 +510,64 @@ Side.prototype.catch = function( err ){
 };
 
 
-Side.prototype.start = Side;
-
-
-Side.prototype.run = function(){
-// Sugar for side.start( code ).get(). It blocks if the underlying code blocks.
-  var action = this.start.apply( this, arguments );
-  return action.get();
+Side.prototype.start = function(){
+  if( this !== CurrentAction )throw new Error( "Side current" );
+  this._check_can_block();
+  return Side.apply( null, arguments );
 };
 
 
-Side.prototype.retry = function( error ){
+Side.prototype.run = function(){
+// Sugar for side.start( code ).outcome(). It blocks if the underlying code blocks.
+  var action = this.start.apply( this, arguments );
+  return action._outcome();
+};
+
+
+Side.prototype.end = function( result ){
+// Prepare for last block
+   this._check_can_block();
+   this._outcome.value = result;  
+   this.deblocker = null;
+   this.retry( Side );
+   return this;
+};
+
+
+Side.prototype._check_can_block = function(){
+  
+  if( this._outcome.error )throw this._outcome.error;
+  
+  if( this.state !== 1 )throw new Error( "Side state" );
+
+  // If action is a subaction, don't run it if parent is done
+  if( this.parent !== RootAction ){
+    var parent_state = this.parent.state;
+    // If parent is done, abort child action
+    if( parent_state === 4 
+    ||  parent_state === 5
+    )throw new Error( "Side parent done" );
+  }
+  
+  return this;
+  
+};
+
+
+Side.prototype.retry = function( cb ){
 // Returns a function that will retry the current action.
 // This function shall typically be used as a callback provided to
 // an async function.
 // A call to side.wait() is expected to follow soon.
 
-  var action = this;
-  
-  if( action.outcome.error )throw action.outcome.error;
-
-  // If action is a subaction, don't run it if parent is done
-  if( action.parent !== RootAction ){
-    var parent_state = action.parent.state;
-    // If parent is done, abort child action
-    if( parent_state === 4 
-    ||  parent_state === 5
-    )throw new Error( "Side done" );
-  }
+  this._check_can_block();
   
   // Return previous result if it is still available
-  if( action.deblocker )return action.deblocker;
+  if( this.deblocker )return this.deblocker;
   
   var f = ( function( error ){
     
-    if( Debug ){
-      console.log( "Retry" );
-    }
+    De&&bug( "Retry" );
     
     // Do nothing if action is blocked on something else now
     if( this.deblocker !==  f )return;
@@ -566,29 +578,39 @@ Side.prototype.retry = function( error ){
     // Only running actions can be rerun, terminating ones can't
     if( this.state !== 1 )return;
     
-    if( error ){
-      this.outcome.error = error;
-      this.state = 3;
+    if( cb ){
+      cb.apply( null, arguments );
+    }else{
+      if( error ){
+        // Process special side.end() sentinel value
+        if( error === Side ){
+          this._outcome.value = error;
+          this.state = 2;
+        }else{
+          this._outcome.error = error;
+          this.state = 3;
+        }
+      }
     }
     
     // Retry the action unless f() is called immediately, ie sync.
     if( CurrentAction !== this ){
-      Side._enqueue( this );
+      this._enqueue();
     }
     
-  } ).bind( action );
+  } ).bind( this );
   
-  action.deblocker = f;
+  this.deblocker = f;
   
   return f;
 
 };
 
 
-Side._enqueue = function( code ){
-  if( code.deblocker )debugger;
+Side.prototype._enqueue = function(){
+  if( this.deblocker )debugger;
   var queue = Writing ? WriteQueue : Queue;
-  queue.push( code );
+  queue.push( this );
   Side._process();
 };
 
@@ -607,15 +629,15 @@ Side.prototype.wait = function( promise ){
     promise.then( 
       retry,
       function( error ){
-        if( !action.outcome.error ){
-          action.outcome.error = error || true;
+        if( !action._outcome.error ){
+          action._outcome.error = error || true;
         }
         retry( error );
       }
     );
   }else{
     // Don't block if retry() was not called recently
-    if( !action.deblocker )return this;
+    if( !action.deblocker )return promise;
   }
   
   throw Side;
@@ -623,23 +645,21 @@ Side.prototype.wait = function( promise ){
 
 
 Side.prototype.abort = function( error ){
-  
-  var action = this;
-  
-  if( action.state !== 0 ){
+
+  if( this.state !== 0 ){
     Side._process();
   }
   
   // Is it too late to abort?
-  if( action.state > 2 )return;
+  if( this.state > 2 )return this;
   
-  action.state = 3;
-  action.outcome.error = error || new Error( "Side abort" );
-  Side._enqueue( action );
+  this.state = 3;
+  this._outcome.error = error || new Error( "Side abort" );
+  this._enqueue();
   
-  if( action === CurrentAction )throw Side;
+  if( this === CurrentAction )throw Side;
   
-  return action;
+  return this;
   
 };
 
@@ -648,13 +668,11 @@ Side.prototype.abort = function( error ){
 Side.prototype.write = function( code, undo ){
 // Queue action to write side effects when current action succeeds
 
-  var action = this;
-
   // ToDo: handle "undo" in case of write error
   code.undo = undo;
-  action.write_queue.push( code );
+  this.write_queue.push( code );
   
-  return action;
+  return this;
   
 };
 
@@ -662,9 +680,8 @@ Side.prototype.write = function( code, undo ){
 Side.prototype.finally = function( code ){
 // Registers code to run once when side action is done, both when it
 // succeeds and when it fails.
-  var action = this;
-  action.finally_queue.push( code );
-  return action;
+  this.finally_queue.push( code );
+  return this;
 };
 
 
@@ -672,12 +689,11 @@ Side.prototype.log = function(){
 // Like console.log() but done when side action fully succeeds or fails.
 // Direct usage of console.log() would instead reissue the same message
 // multiple times due to multiple retries after blocks.
-  var action = this;
   var args = arguments;
-  action.finally( function(){
+  this.finally( function(){
     console.log.apply( console, args );
   } );
-  return action;
+  return this;
 };
 
 
@@ -685,12 +701,11 @@ Side.prototype.error = function(){
 // Like console.error() but done when side action fully succeeds or fails.
 // Direct usage of console.error() would instead reissue the same message
 // multiple times due to multiple retries after blocks.
-  var action = this;
   var args = arguments;
-  action.finally( function(){
+  this.finally( function(){
     console.error.apply( console, args );
   } );
-  return action;
+  return this;
 };
 
 
@@ -698,12 +713,11 @@ Side.prototype.error = function(){
 // Direct usage of console.warn() would instead reissue the same message
 // multiple times due to multiple retries after blocks.
 Side.prototype.warn = function Warn(){
-  var action = this;
   var args = arguments;
-  action.finally( function(){
+  this.finally( function(){
     console.warn.apply( console, args );
   } );
-  return action;
+  return this;
 };
 
 
@@ -711,54 +725,35 @@ Side.prototype.info = function(){
 // Like console.info() but done when side action fully succeeds or fails.
 // Direct usage of console.info() would instead reissue the same message
 // multiple times due to multiple retries after blocks.
-  var action = this;
   var args = arguments;
-  action.finally( function(){
+  this.finally( function(){
     console.info.apply( console, args );
   } );
-  return action;
+  return this;
 };
 
 
-Side.prototype.restore = function( code, code2, no_mutex ){
+Side.prototype.restore = function( code, save, no_mutex ){
 // Queue action to erase side effects when current action fails or blocks.
 
-  var action = this;
-  
-  if( code2 && !code2.call ){
-    no_mutex = code2;
-    code2 = null;
-  }
-  
   if( !no_mutex ){
     // Multiple restores must come from the same action or subactions of it
     if( !Mutex ){
-      Mutex = action;
-      action.mutex = action;
+      Mutex = this;
+      this.mutex = this;
     }else{
-      if( action.mutex !== Mutex )throw new Error( "Side mutex" );
-    }
-    if( code2 ){
-      var safe = code();
-      action.restore_queue.push( function(){ code2( safe ); } );
-    }else{
-      action.restore_queue.push( code );
+      if( this.mutex !== Mutex )throw new Error( "Side mutex" );
     }
   }
   
-  return action;
+  if( arguments.length > 1 ){
+    this.restore_queue.push( function(){ code.call( null, save ); } );
+  }else{
+    this.restore_queue.push( code );
+  }
   
-};
-
-
-Side.prototype.effect = function( write, restore, flush ){
-// Perform side effect and register action to either erase it
-// or flush it depending on current side action's success or failure.
-  var action = this;
-  write();
-  action.restore( restore );
-  action.write( flush );
-  return action;
+  return this;
+  
 };
 
 
@@ -768,9 +763,9 @@ Side.prototype.lambda = function( handler ){
 // object and the context. When it runs the code can access the "context" 
 // using the global variable Side.context.
   var lambda_handler = function( event, context, callback ){
-    var side_action = Side( function(){
+    var side_action = Side( function( side, context ){
       try{
-        callback( null, handler( event, Side, context ) );
+        callback( null, handler( event, side, context ) );
       }catch( error ){
         Side.catch( error );
         callback( error );
@@ -789,11 +784,14 @@ Side.prototype.ize = function( fn ){
 // current action, calling the Sideized version of the same function means that
 // the current action will incur one retry only. The signature of the Sideized
 // function is the same as the signature of the original function.
+  if( fn.side === Side )return fn;
   var f = function(){
     var args = arguments;
     var that = this;
     return Side.it.run( function(){ return fn.apply( that, args ); } );
   };
+  // Flag to avoid duplicate sideized
+  f.side = Side;
   return f;
 };
 
@@ -805,302 +803,18 @@ Side.prototype.idle = function Idle( code ){
 };
 
 
-Side.prototype._cache_lookup = function CacheLookup( key ){
-// Look for key in current side action's cache. If not found, look in
-// parent caches to find a shared cache entry.
-  
-  var action = this;
-  var cached = action.local_cache[ key ];
-  
-  if( cached )return cached;
-  
-  // Look for shared cache from parent action
-  while( action = action.parent ){
-    cached = action.local_cache[ key ];
-    if( !cached )continue;
-    return cached.shared ? cached : null;
-  }
-  
-  return null;
-  
-};
-
-
-Side.prototype.share = function( key, value, error ){
-// To share a cached value with sub actions
-  var action = this;
-  key = action.key( key );
-  var cached = action._cache_lookup( key );
-  if( !cached ){
-    action.set( key, value, error, action );
-  }else{
-    cached.shared = action;
-  }
-  return action;
-};
-
-
-Side.prototype.has = function( key ){
-// Test presence in cache.
-// Usage:
-//  var r = Side.has( "r" ) ? Side.get() : Side.set( "r", compute() );
-  var action = this;
-  return !!action._cache_lookup( action.key( key ) );
-};
-
-
-Side.prototype.set = function( key, value, error, shared ){
-  
-  var action = this;
-  
-  key = action.key( key );
-  
-  var cached = action._cache_lookup( key );
-  
-  if( !cached || cached.shared !== action ){
-    
-    action.local_cache[ key ] = arguments.length > 1
-    ? { error: error, value: value, shared: shared }
-    : { error: error, value: true,  shared: shared };
-    
-    if( !error ){
-      action.cached[ key ] = value;
-    }else{
-      delete action.cached[ key ];
-    }
-    
-    return value;
-  
-  }
-  
-  cached.value = value;
-  cached.error = error;
-  
-  if( !error ){
-    action.cached[ key ] = value;
-  }else{
-    delete action.cached[ key ];
-  }
-  
-  if( arguments.length > 3 ){
-    cached.shared = shared;
-  }
-  
-  return value;
-  
-};
-
-
-Side.prototype.once = function( key, code ){
-// Returns true or runs code if key is not in cache already.
-// Returns false if key is in cache.
-  var action = this;
-  key = action.key( key );
-  if( action.has( key ) )return code ? action.get( key ) : false;
-  if( !code ){
-    action.set( key );
-  }else{
-    action.set( key, code() );
-  }
-  return true;
-};
-
-
-Side.prototype.cache = function( key, code, error ){
-// Get value from cache. Blocks until code to fill cache is run.
-
-  var action = this;
-  if( action.deblocker )throw Side;
-
-  key = action.key( key );
-  
-  var cached = action._cache_lookup( key );
-  
-  // If cached value is available, use it
-  if( cached ){
-    // Use it as soon as the action to get it is done
-    if( cached.value !== Side /* sentinel */ ){
-      if( cached.error )throw cached.error;
-      return cached.value;
-    }
-  
-  // If cached value was never requested, queue action to get it  
-  }else{
-
-    cached 
-    = action.local_cache[ key ] 
-    = { error: null, value: Side, shared: false };
-    
-    // Only callables and thenable promises need that
-    if( !code || ( !code.call && !code.then ) || error ){
-      cached.value = code;
-      cached.error = error;
-      return action.cache( key );
-    }
-    
-    var promise = code;
-
-    // Promisify code if it is not a promise already
-    if( !code.then ){
-      promise = Side( function(){
-        var result = code( Side.retry(), key );
-        Side.wait();
-        return result;
-      } );
-      // Optimize sync case
-      if( cached.value !== Side )return Side.cache( key );
-    }
-    
-    var retry = Side.retry();    
-    
-    promise.then(
-      function( value ){
-        cached.value = value;
-        retry();
-      },
-      function( error ){
-        cached.error = error || true;
-        cached.value = null;
-        retry();
-      }
-    );
-  }
-  
-  // If pending action, it's a block
-  throw Side;
-  
-};
-
-
-Side.prototype.key = function( key /* , ... */ ){
-// Build a new key to access cached values.
-// Usage : k = Side.key( "x", y, z )
-  var action = this;
-  if( !arguments.length
-  ||  ( arguments.length === 1  && typeof key === "undefined" )
-  )return action.last_key;
-  if( arguments.length === 1 && typeof key === "string" ){
-    action.last_key = key;
-    return key;
-  }
-  var new_key = JSON.stringify( [ "key_" ].concat( arguments ) );
-  action.last_key = new_key; 
-  return new_key;
-};
-
-
-Side.prototype.async_call = function( key, fun ){
-  var action = this;
-  key = action.key( key );
-  var cb = action.fill( key );
-  if( cb ){
-    var args = Array.prototype.slice.call( arguments, 2 );
-    args.push( cb );
-    fun.apply( null, args );
-    action.wait();
-  }
-  return action.cache( key );
-};
-
-
-Side.prototype.fill = function( key, as_array ){
-// Tool to cache results of async calls based on callbacks.
-// It returns a callback if the result is not in the cache already.
-// If the result is already pending, it asks for a retry, ie
-// it throws an exception.
-// It returns null if the result is already available.
-// as_array flag processes results without error detection, ie
-// first argument of callback is not a node style error.
-//
-// Usage:
-//   var result = side( "key", ()=> async_op( "key", side.fill() ) );
-// Or:
-//   side.fill( "key" ) && side.wait( async_op( "key", side.fill() ) ) 
-//   var result = side.cache();
-// Or:
-//   var cb = side.fill( "key" ) );
-//   cb && side.wait( async_op( "key", cb ) );
-//   var result = Side.cache();
-  
-  var action = this;
-  
-  if( !arguments.length ){
-    if( Filler ){
-      var filler = Filler;
-      Filler = null;
-      return filler;
-    }
-    key = action.last_key;
-  }else{
-    key = action.key( key );
-  }
-
-  var cached = action._cache_lookup( key );
-  
-  if( cached ){
-    if( cached.value !== Side )return null;
-    throw Side;
-  }
-  
-  cached = action.local_cache[ key ] 
-  = { error: null, value: Side, shared: false };
-  
-  var retry = action.retry();
-  
-  var f = function( error ){
-    if( Filler === f ){
-      Filler = null;
-    }
-    if( action.deblocker !== f )return;
-    action.deblocker = null;
-    if( as_array ){
-      cached.value = arguments.length <= 1 
-      ? error 
-      : Array.prototype.slice.call( arguments );
-      action.cached[ key ] = cached.value;
-    }else{
-      if( error ){
-        cached.error = error;
-        delete action.cached[ key ];
-      }else{
-        if( arguments.length <= 2 ){
-          cached.value = arguments[ 1 ];
-        }else{
-          cached.value = Array.prototype.slice.call( arguments, 1 );
-        }
-        action.cached[ key ] = cached.value;
-      }
-    }
-    retry();
-  };
-  
-  return Filler = f;
-
-};
-
-
 /*
  *  Slot class
  */
 
 function SideSlot( action, id, undef ){
-  this.action = action;
-  this.id = id;
-  this.last_key = action.last_key;
   this.value = undef;
   this.error = undef;
   action.slots[ id ] = this;
 }
 
 
-SideSlot.prototype.fill = function( value, error ){
-// Fill a slot. Should be called after Side.needs( a_slot ) asked.
-  this.error = error;
-  return this.value = value;
-};
-
-
-SideSlot.prototype.filler = function(){
+SideSlot.prototype._filler = function(){
   var retry = Side.retry();
   var slot = this;
   var f = function( error, value ){
@@ -1120,12 +834,6 @@ SideSlot.prototype.filler = function(){
 };
 
 
-SideSlot.prototype.get = function(){
-  if( this.error )throw this.error;
-  return this.value;
-};
-
-
 Side.prototype.slot = function( code ){
 // Allocate a new slot or return the cached slot value.
 // Throw an exception if slot desynchronisation is detected.
@@ -1134,15 +842,10 @@ Side.prototype.slot = function( code ){
   var action = this;
   
   var id = action.next_slot_id++;
-  
+
   // If the slot already exists, provide the memorized outcome
   if( id < action.slots.length ){
     var slot = action.slots[ id ];
-    // If not a new slot, check that it is not out of sync
-    if( slot.last_key !== action.last_key
-    )throw new Error( 
-      "Side slot " + action.last_key + " vs " + slot.last_key
-    );
     // Raise an exception if outcome was an error
     if( slot.error )throw slot.error;
     // Block if outcome is still pending
@@ -1160,21 +863,23 @@ Side.prototype.slot = function( code ){
     
     // A thenable promise
     if( code.then ){
+      new_slot = new SideSlot( action, id );
       // Set sentinel value to flag pending outcome
       new_slot.value = Side;
       // Create a filler function to inject value (or error) in new slot
-      filler = new_slot.filler();
+      filler = new_slot._filler();
       code.then( 
-        function( ok ){ filler( ok ); },
-        function( ko ){ filler( null, ko ); }
+        function( ok ){ filler( null, ok ); },
+        function( ko ){ filler( ko ); }
       );
       // Block
       Side.wait();
       
     // A callable function
     }else if( code.call ){
+      new_slot = new SideSlot( action, id );
       new_slot.value = Side;
-      filler = new_slot.filler();
+      filler = new_slot._filler();
       var result = code.call( null, filler );
       // Result may be a thenable promise
       if( result && result.then ){
@@ -1196,83 +901,38 @@ Side.prototype.slot = function( code ){
       new_slot.value = code;
     }
   
-  // Some false value
-  }else if( arguments.length ){
-    new_slot.value = code;
-  
-  // Undefined slot, that needs to be filled later
   }else{
-    new_slot.value = Side;
+    
+    new_slot.value = code;
+    
   }
   
-  return new_slot;
+  return new_slot.value;
   
-};
-
-
-Side.prototype.needs = function( slot ){
-// Checks if a slot is new and needs to be filled.
-// See also Side.slot() and a_slot.fill(). 
-  if( !slot )return false;
-  return slot.constructor === SideSlot;
 };
 
 
 Side.prototype.then = function( ok, ko ){
 // Side actions are "thenable", ie promise compatible
-  var action = this;
   Side._process();
-  return action.promise.then( ok, ko );
+  return this.promise.then( ok, ko );
 };
 
 
-Side.prototype.get = function( key ){
+Side.prototype.outcome = function(){
 // Get outcome of a side action.
 // This is the sync equivalent to a .then(). If the side
 // action is not done yet, it blocks, ie it raises an
 // exception that demands a retry of the current action.
-  // When called with a parameter, it's actually sugar for .cache( key )
-  if( arguments.length )return this.cache( key );
-  // When .get() is called by current action, it's actually sugar for .cache()
-  if( this === CurrentAction )return this.cache();
   // Optimist case when outcome is already available
-  if( this.state === 4 )return this.outcome.value;
-  if( this.state === 5 )throw  this.outcome.error;
+  if( this.state === 4 )return this._outcome.value;
+  if( this.state === 5 )throw  this._outcome.error;
   // Optimist case when outcome is easy (ie sync) to get now
   Side._process();
-  if( this.state === 4 )return this.outcome.value;
-  if( this.state === 5 )throw  this.outcome.error;
+  if( this.state === 4 )return this._outcome.value;
+  if( this.state === 5 )throw  this._outcome.error;
   // Pessimist case, need to block, waiting for outcome
   throw Side;
-};
-
-
-
-Side.prototype.restart = function( ctx ){
-// An existing action can be restarted at any time. All cache
-// entries are cleared. If a new context is provided, it overides
-// the previous one. When called by the current action, that
-// action is interrupted and restarted immediately.
-  
-  var action = this;
-  
-  var state = action.state;
-  if( state !== 0 && state !== 4 && state !== 5 
-  )throw new Error( "Side restart" );
-  action.state = 0;
-  
-  if( arguments.length ){
-    action.context = ctx;
-  }
-  
-  Side._reset( action );
-  
-  Side._enqueue( action );
-  
-  if( action === CurrentAction )throw Side;
-  
-  return action;
-
 };
 
 
@@ -1281,23 +941,23 @@ Side.prototype.detach = function(){
 // before the child action.
 
   var action = this;
-  var parent = action.parent;
+  var parent = this.parent;
 
   // Do nothing if already detached
   if( parent === RootAction )return;
   
   // Set parent so that action is now a child of the root action
-  action.parent = RootAction;
+  this.parent = RootAction;
   
   // Action won't run until mutex owner action is done
-  if( action.mutex && Mutex !== action ){
-    action.mutex = null;
+  if( this.mutex && Mutex !== this ){
+    this.mutex = null;
   }
 
   // Retry parent when no child action remains
   parent.subactions--;
   if( !parent.subactions && !parent.blocked() ){
-    Side._enqueue( parent );
+    parent._enqueue();
   }
   
   return action;
@@ -1305,8 +965,20 @@ Side.prototype.detach = function(){
 };
 
 
+Side.prototype.once = function( key ){
+  if( this.context[ key ] )return false;
+  this.context[ key ] = true;
+  return true;
+};
+
+
 Side.prototype.blocked = function(){
   return !!this.deblocker;
+};
+
+
+Side.prototype.pending = function(){
+  return this.state === 1;
 };
 
 
@@ -1321,7 +993,7 @@ Side.prototype.success = function(){
 
 
 Side.prototype.failure = function(){
-  return this.state === 5 && this.outcome.error;
+  return this.state === 5 && this._outcome.error;
 };
 
 
@@ -1349,7 +1021,8 @@ Side.prototype.smoke_tests = function( with_trace ){
   var test_id = 0;
   var errors = 0;
   
-  Debug = with_trace;
+  // Activate traces and assert when in debug mode
+  De = with_trace;
   
   function ok( msg ){
     test_id++;
@@ -1400,7 +1073,7 @@ Side.prototype.smoke_tests = function( with_trace ){
   
   // Test 1
   const Test1 = "Simple sync get";
-  is_ok( Test1, Side( ()=> "ok" ).get() )
+  is_ok( Test1, Side( ()=> "ok" ).outcome() )
   && ok( Test1 );
   
   // Test 2
@@ -1412,7 +1085,7 @@ Side.prototype.smoke_tests = function( with_trace ){
   var ok_side = Side( Promise.resolve( "ok" ) );
   var then
   = ok_side.then( r => is_ok( "promise", r )
-    &&                 is_ok( "promise get", ok_side.get() )
+    &&                 is_ok( "promise get", ok_side.outcome() )
     &&                 ok( Test3 ) );
   
   // Test 4
@@ -1420,7 +1093,7 @@ Side.prototype.smoke_tests = function( with_trace ){
   var retry;
   then = then.then( 
     ()=> blocks( Test4,
-      ()=> Side( ( it )=> ( retry = it.retry() ) && it.wait() ).get()
+      ()=> Side( ( it )=> ( retry = it.retry() ) && it.wait() ).outcome()
     ) && setTimeout( ()=> retry(), 0 )
   ).then( ()=> ok( Test4 ) );
   
@@ -1446,11 +1119,11 @@ Side.prototype.smoke_tests = function( with_trace ){
         it.log( Test5, "done" );
         return "ok";
       } );
-      x.get();
+      x.outcome();
     } )
   ).then( 
     function(){
-      is_ok( "async get", x.get() );
+      is_ok( "async get", x.outcome() );
       if( global_ok === "changed" ){
         is_ok( "global changed", global_ok = "ok" );
       }
@@ -1490,28 +1163,17 @@ Side.prototype.smoke_tests = function( with_trace ){
       }
       mutex = "ok";
       is_ok( "mutex free", mutex );
-    } ).get() )
+    } ).outcome() )
   ).then( ()=> ok( Test6 ), ( error )=> ko( Test6, error ) );
   
   // Test 7
-  var Test7 = "share";
+  var Test7 = "slots";
   then = then.then( ()=> Side( function( it ){
-    it.share( "it" );
-    it.set( "it", "ok" );
-    is_ok( "parent", it.get() );
-    Side( it => is_ok( "child", it.cache( "it" ) ) && ok( Test7 ) );
+    var a = it.slot( function( cb ){
+      cb( "ok ");
+    } );
+    is_ok( "slot", a ) && ok( Test7 );
   } ), ( error )=> ko( Test7, error ) );
-  
-  
-  // Test 8
-  var Test8 = "slots";
-  then = then.then( ()=> Side( function( it ){
-    var a = it.slot();
-    if( it.needs( a ) ){
-      a = a.fill( "ok" );
-    }
-    is_ok( "slot", a ) && ok( Test8 );
-  } ), ( error )=> ko( Test8, error ) );
   
   // Results
   
@@ -1551,9 +1213,9 @@ Side.it = RootAction;
 // Provide access to the root action
 Side.prototype.root = RootAction;
 
-// Alias, universal access to the action factory
+// Alias, universal access to the side action factory
 Side.prototype.Side = Side;
-Side.prototype.side = side;
+Side.prototype.side = Side;
 
 // Export it
 return Side;
