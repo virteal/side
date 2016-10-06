@@ -251,8 +251,8 @@ Additionaly, for convenience, `Side()` (without parameters), creates a new
 ### Side.it - access to current side action
 
 When a side action runs, global `Side.it` references it. When a new side
-action is created while no side action is running, its parent is the
-special root side action (`Side.root`).
+action is created while no side action is running, its parent, `side.parent`,
+is the special root side action (`Side.root`).
 
 As a convenience, `.it` and `.root` are also available on side action objects
 in addition to their availability on the global `Side()` factory.
