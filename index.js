@@ -150,7 +150,7 @@ function Side( code, ctx, p1, p2, p3, p4, p5 ){
   }
   
   // How many time the action was attempted
-  new_action.attemps = 0;
+  new_action.attempts = 0;
   
   // Queue for delayed writes
   new_action.write_queue = null;
@@ -169,9 +169,6 @@ function Side( code, ctx, p1, p2, p3, p4, p5 ){
   
   // Usefull to check that slot allocation order is constant
   new_action.max_slot_id = 0;
-  
-  // The default key will be the one set at action's creation
-  new_action.last_key = null;  
   
   // When provided a thenable, it provides the outcome.
   if( code.then ){
@@ -268,7 +265,7 @@ Side.prototype._process = function( error ){
   if( action.subactions )return;
   
   // Don't run if some deblocker function needs to be called first
-  if( action.deblocker ){
+  if( action.deblocker && action.deblocker !== Side ){
     debugger;
     return;
   }
@@ -353,7 +350,7 @@ Side.prototype._process = function( error ){
         Block = action;
         
         // Reverse side effects before waiting
-        process_writes( action.restore_queue );
+        process_writes( action, action.restore_queue );
         
       }else{
         
@@ -424,7 +421,9 @@ Side.prototype._process = function( error ){
   if( action.state === 4 || action.state === 5 ){
     
     // Are there actions to run finally?
+    action.state -= 2;
     process_writes( action, action.finally_queue );
+    action.state += 2;
     
     // Unblock parent if last subaction
     if( !action.subactions ){
@@ -470,7 +469,7 @@ Side.prototype._process = function( error ){
     action.start( next ).end().then(
       function(){ process_writes( action, actions ); },
       function( error ){
-        if( !action.parent.outcome.error ){
+        if( !action.parent._outcome.error ){
           action.parent._outcome.error = error || true;
           action.parent.state = 3;
         }
@@ -512,7 +511,6 @@ Side.prototype.catch = function( err ){
 
 Side.prototype.start = function(){
   if( this !== CurrentAction )throw new Error( "Side current" );
-  this._check_can_block();
   return Side.apply( null, arguments );
 };
 
@@ -527,8 +525,9 @@ Side.prototype.run = function(){
 Side.prototype.end = function( result ){
 // Prepare for last block
    this._check_can_block();
-   this._outcome.value = result;  
-   this.deblocker = null;
+   this._outcome.value = result;
+   this.deblocker =  null;
+   return this;
    this.retry( Side );
    return this;
 };
@@ -536,9 +535,13 @@ Side.prototype.end = function( result ){
 
 Side.prototype._check_can_block = function(){
   
-  if( this._outcome.error )throw this._outcome.error;
+  if( this._outcome.error ){
+    throw this._outcome.error;
+  }
   
-  if( this.state !== 1 )throw new Error( "Side state" );
+  if( this.state > 3 ){
+    throw new Error( "Side state" );
+  }
 
   // If action is a subaction, don't run it if parent is done
   if( this.parent !== RootAction ){
@@ -578,19 +581,15 @@ Side.prototype.retry = function( cb ){
     // Only running actions can be rerun, terminating ones can't
     if( this.state !== 1 )return;
     
-    if( cb ){
+    if( cb && cb !== Side ){
       cb.apply( null, arguments );
-    }else{
-      if( error ){
-        // Process special side.end() sentinel value
-        if( error === Side ){
-          this._outcome.value = error;
-          this.state = 2;
-        }else{
-          this._outcome.error = error;
-          this.state = 3;
-        }
-      }
+    
+    }else if( error ){
+      this._outcome.error = error;
+      this.state = 3;
+    
+    }else if( cb === Side ){
+      this.state = 2;
     }
     
     // Retry the action unless f() is called immediately, ie sync.
@@ -807,15 +806,14 @@ Side.prototype.idle = function Idle( code ){
  *  Slot class
  */
 
-function SideSlot( action, id, undef ){
+function SideSlot( id, undef ){
   this.value = undef;
   this.error = undef;
-  action.slots[ id ] = this;
 }
 
 
-SideSlot.prototype._filler = function(){
-  var retry = Side.retry();
+SideSlot.prototype._filler = function( action ){
+  var retry = action.retry();
   var slot = this;
   var f = function( error, value ){
     if( error ){
@@ -857,17 +855,18 @@ Side.prototype.slot = function( code ){
   // A new slot is needed, create it
   var new_slot = new SideSlot( action, id );
   
+  action.slots[ id ] = new_slot;
+  
   if( code ){
     
     var filler;
     
     // A thenable promise
     if( code.then ){
-      new_slot = new SideSlot( action, id );
       // Set sentinel value to flag pending outcome
       new_slot.value = Side;
       // Create a filler function to inject value (or error) in new slot
-      filler = new_slot._filler();
+      filler = new_slot._filler( action );
       code.then( 
         function( ok ){ filler( null, ok ); },
         function( ko ){ filler( ko ); }
@@ -877,9 +876,8 @@ Side.prototype.slot = function( code ){
       
     // A callable function
     }else if( code.call ){
-      new_slot = new SideSlot( action, id );
       new_slot.value = Side;
-      filler = new_slot._filler();
+      filler = new_slot._filler( action );
       var result = code.call( null, filler );
       // Result may be a thenable promise
       if( result && result.then ){
@@ -1026,7 +1024,7 @@ Side.prototype.smoke_tests = function( with_trace ){
   
   function ok( msg ){
     test_id++;
-    log( "----- Test OK", msg, test_id );
+    log( "----- Test OK", msg, test_id, "\n" );
     return true;
   }
   
@@ -1073,29 +1071,51 @@ Side.prototype.smoke_tests = function( with_trace ){
   
   // Test 1
   const Test1 = "Simple sync get";
-  is_ok( Test1, Side( ()=> "ok" ).outcome() )
-  && ok( Test1 );
+  is_ok( 
+    Test1, 
+    Side( function(){ 
+      return "ok"; 
+    } ).outcome()
+  );
+  ok( Test1 );
   
   // Test 2
   const Test2 = "Simple then";
-  Side( ()=> "ok" ).then( r => is_ok( Test2, r ) && ok( Test2 ) );
+  Side( function(){
+    return "ok";
+  } ).then( function( r ){
+    is_ok( Test2, r );
+    ok( Test2 );
+  } );
   
   // Test 3
   const Test3 = "Simple Promise get";
   var ok_side = Side( Promise.resolve( "ok" ) );
-  var then
-  = ok_side.then( r => is_ok( "promise", r )
-    &&                 is_ok( "promise get", ok_side.outcome() )
-    &&                 ok( Test3 ) );
+  var then = ok_side.then( function( r ){
+    is_ok( "promise", r );
+    is_ok( "promise get", ok_side.outcome() );
+    ok( Test3 );
+  } );
   
   // Test 4
   const Test4 = "Simple async get";
   var retry;
   then = then.then( 
-    ()=> blocks( Test4,
-      ()=> Side( ( it )=> ( retry = it.retry() ) && it.wait() ).outcome()
-    ) && setTimeout( ()=> retry(), 0 )
-  ).then( ()=> ok( Test4 ) );
+    function(){
+      blocks( 
+        Test4,
+        function( it ){ 
+          Side( function( it ){ 
+            retry = it.retry();
+            it.wait();
+          } ).outcome();
+        }
+      );
+      setTimeout( function(){
+        retry();
+      }, 0 );
+    }
+  ).then( function(){ ok( Test4 ); } );
   
   // Test 5
   
@@ -1170,14 +1190,14 @@ Side.prototype.smoke_tests = function( with_trace ){
   var Test7 = "slots";
   then = then.then( ()=> Side( function( it ){
     var a = it.slot( function( cb ){
-      cb( "ok ");
+      cb( null, "ok" );
     } );
     is_ok( "slot", a ) && ok( Test7 );
   } ), ( error )=> ko( Test7, error ) );
   
   // Results
   
-  var TESTS = 8;
+  var TESTS = 7;
   
   var test_result = new Promise( function( resolve, reject ){
     
@@ -1186,7 +1206,7 @@ Side.prototype.smoke_tests = function( with_trace ){
     function out(){
       if( done )return;
       done = true;
-      Debug = false;
+      De = false;
       if( !errors && test_id === TESTS ){
         log( "SUCCESS, all tests passed:", test_id );
         resolve( true );
