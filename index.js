@@ -12,7 +12,7 @@
     module.exports = factory();
     if( typeof require === 'function' && require.main === module ){
       module.exports.it.smoke_tests( true /* traces */ )
-      .then( ok => process.exit( ok ? 0 : 1 ) );
+      .then( function( ok ){ process.exit( ok ? 0 : 1 ); } );
     }
   }else{
     root.Side = factory();
@@ -36,7 +36,11 @@ function mand( ok, msg ){
   if( ok )return;
   console.warn( "Failed assert:", msg );
 }
- 
+
+
+// Blocks/Interruptions are signaled using a special exception
+var BlockException = new Error( "Side block" );
+
 // Side actions are child actions of some parent, the root action when none
 var RootAction;
 
@@ -64,12 +68,12 @@ var WriteQueue = [];
 // Queue of functions to call next time other queues are empty
 var IdleQueue = [];
 
-// Easy access to last action that blocked via some kind of "throw Side;"
+// Easy access to last action that blocked via some kind of "throw BlockException"
 var Block = null;
 
 
 /*
- *  Side action class
+ *  Side action factory
  */
 
 function Side( code, ctx, p1, p2, p3, p4, p5 ){
@@ -145,12 +149,19 @@ function Side( code, ctx, p1, p2, p3, p4, p5 ){
       }
     }
   
-  }else{
-    new_action.init_last_key = "root";
   }
   
   // How many time the action was attempted
   new_action.attempts = 0;
+  
+  // Local time for the side action
+  new_action._now = null;
+  
+  // .random() must provide the same numbers over and over
+  new_action._random = null;
+  
+  // Track progress inside ._random array
+  new_action.random_index = 0;
   
   // Queue for delayed writes
   new_action.write_queue = null;
@@ -189,6 +200,8 @@ function Side( code, ctx, p1, p2, p3, p4, p5 ){
     if( new_action.parent.mutex === Mutex ){
       new_action.mutex = Mutex;
     }
+    // Sub side actions share the same "now"
+    new_action._now = new_action.parent._now;
   }
   
   new_action._enqueue();
@@ -265,7 +278,7 @@ Side.prototype._process = function( error ){
   if( action.subactions )return;
   
   // Don't run if some deblocker function needs to be called first
-  if( action.deblocker && action.deblocker !== Side ){
+  if( action.deblocker && action.deblocker !== BlockException ){
     debugger;
     return;
   }
@@ -304,8 +317,8 @@ Side.prototype._process = function( error ){
     this.write_queue   = [];
     this.restore_queue = [];
     this.finally_queue = [];
-    this.last_key      = this.init_last_key;
     this.next_slot_id  = 0;
+    this.random_index  = 0;
   }
   
   // Until all blocks are cleared or error
@@ -344,7 +357,7 @@ Side.prototype._process = function( error ){
     }catch( error ){
       
       // If action is blocked, wait, else handle error
-      if( error === Side ){
+      if( error === BlockException ){
         
         // Remember what is the last side action that blocked
         Block = action;
@@ -496,7 +509,7 @@ Side.prototype.is_block = function( err ){
 // Checks whether an exception is actually a block that requires a retry.
 // See side.wait() to raise such an exception, typically after a call to
 // some kind of side.retry().
-  return err === Side;
+  return err === BlockException;
 };
 
 
@@ -505,7 +518,7 @@ Side.prototype.catch = function( err ){
 // When a function "blocks", it raises a special exception that is not to be
 // handled like "normal" errors. side.catch() detects such blocks and rethrow
 // the same special exception when it sees one.
-  if( err === Side )throw err;
+  if( err === BlockException )throw err;
 };
 
 
@@ -581,14 +594,14 @@ Side.prototype.retry = function( cb ){
     // Only running actions can be rerun, terminating ones can't
     if( this.state !== 1 )return;
     
-    if( cb && cb !== Side ){
+    if( cb && cb !== BlockException ){
       cb.apply( null, arguments );
     
     }else if( error ){
       this._outcome.error = error;
       this.state = 3;
     
-    }else if( cb === Side ){
+    }else if( cb === BlockException ){
       this.state = 2;
     }
     
@@ -639,7 +652,7 @@ Side.prototype.wait = function( promise ){
     if( !action.deblocker )return promise;
   }
   
-  throw Side;
+  throw BlockException;
 };
 
 
@@ -656,7 +669,7 @@ Side.prototype.abort = function( error ){
   this._outcome.error = error || new Error( "Side abort" );
   this._enqueue();
   
-  if( this === CurrentAction )throw Side;
+  if( this === CurrentAction )throw BlockException;
   
   return this;
   
@@ -847,7 +860,7 @@ Side.prototype.slot = function( code ){
     // Raise an exception if outcome was an error
     if( slot.error )throw slot.error;
     // Block if outcome is still pending
-    if( slot.value === Side )throw Side;
+    if( slot.value === BlockException )throw BlockException;
     // Return the outcome value
     return slot.value;
   }
@@ -876,7 +889,7 @@ Side.prototype.slot = function( code ){
       
     // A callable function
     }else if( code.call ){
-      new_slot.value = Side;
+      new_slot.value = BlockException;
       filler = new_slot._filler( action );
       var result = code.call( null, filler );
       // Result may be a thenable promise
@@ -889,7 +902,7 @@ Side.prototype.slot = function( code ){
       // If not a promise, then the filler callback needs to be called
       }else{
         // Block unless filler was called
-        if( new_slot.value === Side ){
+        if( new_slot.value === BlockException ){
           action.wait();
         }
       }
@@ -930,7 +943,7 @@ Side.prototype.outcome = function(){
   if( this.state === 4 )return this._outcome.value;
   if( this.state === 5 )throw  this._outcome.error;
   // Pessimist case, need to block, waiting for outcome
-  throw Side;
+  throw BlockException;
 };
 
 
@@ -970,6 +983,37 @@ Side.prototype.once = function( key ){
 };
 
 
+
+Side.prototype.random = function(){
+  if( !this._random ){
+    this._random = [];
+  }
+  if( this.random_index >= this._random.length ){
+    var new_random = Math.random();
+    this._random[ this.random_index++ ] = new_random;
+    return new_random;
+  }
+  return this._random[ this.random_index++ ];
+};
+
+
+Side.prototype.now = function(){
+  if( !this._now ){
+    this._now = Date.now();
+  }
+  return this._now;
+};
+
+
+Side.prototype.sleep = function( delay ){
+  this.slot( function(){
+    setTimeout( this.retry(), delay );
+    this.wait();
+  } );
+  return this;
+};
+
+
 Side.prototype.blocked = function(){
   return !!this.deblocker;
 };
@@ -1005,13 +1049,6 @@ Side.prototype.smoke_tests = function( with_trace ){
   function log_error(){
     if( !with_trace )return true;
     console.error.apply( console, arguments );
-  }
-  
-  function delay( key ){
-    if( Side.has( key ) )return;
-    Side.set();
-    setTimeout( Side.retry(), 300 );
-    Side.wait();
   }
   
   console.log( "SMOKE TEST" );
@@ -1124,33 +1161,35 @@ Side.prototype.smoke_tests = function( with_trace ){
   var write_done = false;
   
   var x;
-  then = then.then( 
-    ()=> blocks( Test5, function(){
+  then = then.then( function(){ 
+    return blocks( Test5, function(){
       x = Side( function( it ){
         it.log( Test5, "started" );
         is_ok( "global", global_ok );
+        it.restore( function( v ){ global_ok = v; }, global_ok );
         global_ok = "changed";
-        it.restore( ()=> global_ok = "ok" );
         it.once( "t" ) && setTimeout( it.retry(), 0 );
         it.wait(); 
         is_ok( "retry", "ok" );
         is_ok( "local global change", global_ok === "changed" && "ok" );
-        it.write( ()=> write_done = "ok" );
+        it.write( function(){ write_done = "ok"; } );
         it.log( Test5, "done" );
         return "ok";
       } );
       x.outcome();
-    } )
-  ).then( 
+    } );
+  } ).then( 
     function(){
       is_ok( "async get", x.outcome() );
       if( global_ok === "changed" ){
         is_ok( "global changed", global_ok = "ok" );
+      }else{
+        is_ok( "global changed", "ko" );
       }
       is_ok( "write done", write_done );
       ok( Test5 );
     },
-    ( error )=> ko( Test5, error ) 
+    function( error ){ ko( Test5, error ); } 
   );
   
   // Test 6
@@ -1160,40 +1199,52 @@ Side.prototype.smoke_tests = function( with_trace ){
   var mutex = "ok";
   
   then = then.then(
-    ()=> blocks( "mutex", ()=> Side( function( it ){
-      it.restore( X=>X );
-      mutex = "locked";
-      it.once( "check mutex" )
-      && setTimeout( ()=> Side( ()=> is_ok( "mutex", mutex ) ), 0 );
-      it.once( "delay" )
-      && setTimeout( it.retry(), 1000 );
-      it.once( "check mutex 2" )
-      && it.idle( ()=> is_ok( "locked", mutex === "locked" && "ok" ) );
-      it.wait();
-      if( it.once( "check mutex 3" ) ){
+    function(){
+      return blocks( "mutex", function(){ 
         Side( function( it ){
-          is_ok( "locked for sub action", mutex === "locked" && "ok" );
-          it.once( "delay" )
-          && setTimeout( it.retry(), 500 );
+          it.restore( function(){} );
+          mutex = "locked";
+          it.once( "check mutex" ) && setTimeout( function(){
+            Side( function(){ is_ok( "mutex", mutex ); } ); 
+          }, 0 );
+          it.once( "delay" ) && setTimeout( it.retry(), 1000 );
+          it.once( "check mutex 2" )
+          && it.idle( function(){ is_ok( "locked", mutex === "locked" && "ok" ); } );
           it.wait();
-          is_ok( "kept locked", mutex === "locked" && "ok" );
-        } );  
-        it.once( "delay2" ) && setTimeout( it.retry(), 1000 );
-        it.wait();
-      }
-      mutex = "ok";
-      is_ok( "mutex free", mutex );
-    } ).outcome() )
-  ).then( ()=> ok( Test6 ), ( error )=> ko( Test6, error ) );
+          if( it.once( "check mutex 3" ) ){
+            Side( function( it ){
+              is_ok( "locked for sub action", mutex === "locked" && "ok" );
+              it.once( "delay" )
+              && setTimeout( it.retry(), 500 );
+              it.wait();
+              is_ok( "kept locked", mutex === "locked" && "ok" );
+            } );  
+            it.once( "delay2" ) && setTimeout( it.retry(), 1000 );
+            it.wait();
+          }
+          mutex = "ok";
+          is_ok( "mutex free", mutex );
+        } ).outcome();
+      } );
+    }
+  ).then( 
+    function(){ ok( Test6 ) }, 
+    function( error ){ ko( Test6, error ); } 
+  );
   
   // Test 7
   var Test7 = "slots";
-  then = then.then( ()=> Side( function( it ){
-    var a = it.slot( function( cb ){
-      cb( null, "ok" );
-    } );
-    is_ok( "slot", a ) && ok( Test7 );
-  } ), ( error )=> ko( Test7, error ) );
+  then = then.then( 
+    function(){
+      Side( function( it ){
+        var a = it.slot( function( cb ){
+          cb( null, "ok" );
+        } );
+        is_ok( "slot", a ) && ok( Test7 );
+      } );
+    },
+    function( error ){ ko( Test7, error ); }
+  );
   
   // Results
   

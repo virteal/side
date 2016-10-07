@@ -512,6 +512,28 @@ var a = side.slot( cb => async_read( "something", cb ) );
 var b = side.slot( () => promise_read( "something" ) );
 ```
 
+## side.random() - deterministic random numbers
+
+If random numbers are required by a blocking side action, the same numbers
+must be provided whenever the side action is restarted. `side.random()` store
+delivered numbers in order to deliver them again when the side action is
+restarted.
+
+
+## side.now() - frozen time during side action
+
+When the behavior of a side action depends on the current time, that time should
+not change or else the side action may have to be retried forever. 
+
+`side.now()` returns a timestamp like `Date.now()` does. This timestamp will stay
+the same during the life time of the side action.
+
+
+## side.sleep( delay_ms ) - block for a fixed time
+
+After the specified delay the current side action is restarted.
+
+
 ## Side.ize( fn ) - efficiency
 
 Because every block requires a new attempt, faking synchronous code with pure
