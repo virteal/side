@@ -7,6 +7,26 @@ It helps avoid "callback hell" and/or promises for those who prefer a more
 traditionnal synchronous style of programming. It works outside of AWS
 Lambda too.
 
+**Historical status (2026)**
+
+side was a JavaScript-specific technique and small library to give asynchronous code (especially Lambda-style) a synchronous face: functions that block on async results are retried from the top; results are cached in "slots" (so repeated work is fast); side effects are explicitly delayed and only committed on success (`write`, `restore` for reversibility, `once`, etc.).
+
+It is no longer the primary home for the underlying pattern. The pattern (retryable units with memoized sub-results + explicit commit of side effects, safe abandonment via obsolescence) maps directly onto COP primitives:
+
+- Continuations for resumption points.
+- Obsolescence (agent-decided, including by AI) for dead-ends.
+- Stable vs. provisional artifacts + `cacheKey` + `lookupReusableArtifact` + retention policies for capitalization of useful intermediary results and controlled GC/forget/hold.
+- Tasks as the scope for a "cognitive turn" with before/after stable states.
+
+Current use appears as a complementary outer layer around COP flows: wrap a higher-level "cognitive function" or exploration unit in a Side-style action so individual Cogitor calls are cached across retries, while only final effects (promoting stable artifacts, real writes) happen on success.
+
+The bridges and integration notes live in inseme/packages/cop-kernel (see the l8 + side section in task-step-continuation-lineage.md).
+
+See Inox#17 (https://github.com/JeanHuguesRobert/Inox/issues/17) for the destiny discussion of l8 and side. User confirmation (verbatim): "I know what I want, I want to move out of Javascript and move in to Inox. But, unfortunately, there is no stabilized version of Inox yet and as a result we keep producing Javascript code (and we avoid TypeScript somehow when it's reasonnable)."
+
+The original side code is preserved as a historical reference implementation of the JS-era pattern.
+
+---
 
 ```javascript
 Side( function( side ){
